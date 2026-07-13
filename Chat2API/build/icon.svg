@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bodyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0066FF;stop-opacity:1" />
+      <stop offset="40%" style="stop-color:#0099FF;stop-opacity:1" />
+      <stop offset="70%" style="stop-color:#00CCFF;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#00E5FF;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="bellyGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#B3E5FC;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#E1F5FE;stop-opacity:1" />
+    </linearGradient>
+    <radialGradient id="eyeShine" cx="35%" cy="35%">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#001133;stop-opacity:1" />
+    </radialGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="100" fill="#0a0a1a"/>
+  <!-- Body -->
+  <ellipse cx="255" cy="260" rx="180" ry="130" fill="url(#bodyGrad)" filter="url(#glow)"/>
+  <!-- Lighter belly -->
+  <ellipse cx="260" cy="290" rx="140" ry="80" fill="url(#bellyGrad)" opacity="0.6"/>
+  <!-- Dorsal fin -->
+  <path d="M200 135 Q240 20 320 135 Q280 119 200 135Z" fill="#0055DD" filter="url(#glow)"/>
+  <!-- Tail -->
+  <path d="M430 240 Q500 180 490 260 Q500 340 430 280" fill="#0044CC" filter="url(#glow)"/>
+  <!-- Pectoral fin -->
+  <path d="M280 320 Q340 380 250 370 Q280 340 280 320Z" fill="#0055DD"/>
+  <!-- Snout / nose -->
+  <ellipse cx="85" cy="255" rx="40" ry="35" fill="#0077EE"/>
+  <!-- Eye -->
+  <circle cx="130" cy="235" r="18" fill="#001133"/>
+  <circle cx="134" cy="231" r="7" fill="white"/>
+  <circle cx="128" cy="239" r="3" fill="white" opacity="0.4"/>
+  <!-- Smile -->
+  <path d="M95 270 Q115 290 140 278" stroke="#0044AA" stroke-width="2" fill="none" stroke-linecap="round"/>
+  <!-- Water splash effects -->
+  <circle cx="460" cy="320" r="8" fill="#00E5FF" opacity="0.6"/>
+  <circle cx="475" cy="305" r="5" fill="#00CCFF" opacity="0.5"/>
+  <circle cx="450" cy="335" r="6" fill="#0099FF" opacity="0.4"/>
+  <circle cx="440" cy="300" r="4" fill="#00E5FF" opacity="0.3"/>
+  <circle cx="480" cy="325" r="7" fill="#0066FF" opacity="0.5"/>
+</svg>

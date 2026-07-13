@@ -14,7 +14,8 @@ import {
   Info,
   MessageSquare,
   AlertTriangle,
-} from 'lucide-react'
+  TerminalSquare,
+} from 'lucide-react' 
 import { cn } from '@/lib/utils'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useNavigationStore } from '@/stores/navigationStore'
@@ -40,6 +41,7 @@ const navItems: NavItem[] = [
   { titleKey: 'nav.proxy', href: '/proxy', icon: Settings2 },
   { titleKey: 'nav.models', href: '/models', icon: Cpu },
   { titleKey: 'nav.session', href: '/session', icon: MessageSquare },
+  { titleKey: 'nav.scripts', href: '/scripts', icon: TerminalSquare },
   { titleKey: 'nav.apiKeys', href: '/api-keys', icon: Key },
   { titleKey: 'nav.logs', href: '/logs', icon: FileText },
   { titleKey: 'nav.settings', href: '/settings', icon: Settings },
@@ -89,8 +91,9 @@ export function Sidebar() {
     cancelNavigation()
   }
 
-  const NavButton = ({ item }: { item: NavItem }) => {
+  const NavButton = ({ item, index }: { item: NavItem; index: number }) => {
     const title = t(item.titleKey)
+    const isActive = location.pathname === item.href
     const buttonContent = (
       <div
         onClick={(e) => {
@@ -108,18 +111,21 @@ export function Sidebar() {
               e.preventDefault()
             }
           }}
-          className={({ isActive }) =>
-            cn(
-              'sidebar-nav-item',
-              sidebarCollapsed ? 'collapsed' : 'expanded',
-              isActive ? 'active' : 'inactive'
-            )
-          }
+          className={cn(
+            'sidebar-card-item group',
+            sidebarCollapsed ? 'collapsed' : 'expanded',
+            isActive ? 'active' : 'inactive'
+          )}
         >
-          <item.icon className="h-5 w-5 flex-shrink-0" />
+          <div className={cn(
+            'sidebar-card-icon',
+            isActive && 'sidebar-card-icon-active'
+          )}>
+            <item.icon className="h-5 w-5 flex-shrink-0" />
+          </div>
           <span
             className={cn(
-              'whitespace-nowrap transition-all duration-300',
+              'whitespace-nowrap transition-all duration-300 font-medium',
               sidebarCollapsed ? 'w-0 opacity-0 overflow-hidden' : 'w-auto opacity-100'
             )}
           >
@@ -144,16 +150,16 @@ export function Sidebar() {
         )}
       >
         <nav className="flex-1 p-3 space-y-1 overflow-x-hidden overflow-y-auto pt-5">
-          {navItems.map((item) => (
-            <NavButton key={item.href} item={item} />
+          {navItems.map((item, index) => (
+            <NavButton key={item.href} item={item} index={index} />
           ))}
         </nav>
 
-        <div className="mx-4 border-t border-[var(--glass-border)] opacity-50" />
+        <div className="mx-4 border-t border-[var(--cyber-blue)]/20 my-2" />
 
         <div className="p-3 overflow-hidden flex justify-center">
           <button
-            className="sidebar-collapse-btn"
+            className="sidebar-collapse-btn-card"
             onClick={toggleSidebar}
             aria-label={sidebarCollapsed ? t('settings.sidebarCollapsedHelp') : t('settings.sidebarCollapsedHelp')}
             title={sidebarCollapsed ? t('settings.sidebarCollapsedHelp') : t('settings.sidebarCollapsedHelp')}

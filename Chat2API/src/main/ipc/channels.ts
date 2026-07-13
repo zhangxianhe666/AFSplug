@@ -120,6 +120,9 @@ export const IpcChannels = {
 
   CONTEXT_MANAGEMENT_GET_CONFIG: 'contextManagement:getConfig',
   CONTEXT_MANAGEMENT_UPDATE_CONFIG: 'contextManagement:updateConfig',
+
+  SCRIPTS_RUN: 'scripts:run',
+  SCRIPTS_LIST: 'scripts:list',
 } as const
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels]

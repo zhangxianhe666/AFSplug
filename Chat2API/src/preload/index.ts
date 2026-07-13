@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import { exec } from 'child_process'
 import { IpcChannels } from '../main/ipc/channels'
 import type { 
   Provider, 
@@ -498,148 +499,70 @@ const configAPI = {
   get: (): Promise<AppConfig> => 
     ipcRenderer.invoke(IpcChannels.CONFIG_GET),
   
-  update: (updates: Partial<AppConfig>): Promise<boolean> => 
+  update: (updates: Partial<AppConfig>): Promise<boolean> =>
     ipcRenderer.invoke(IpcChannels.CONFIG_UPDATE, updates),
-  
-  onConfigChanged: (callback: (config: AppConfig) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, config: AppConfig) => callback(config)
-    ipcRenderer.on(IpcChannels.CONFIG_CHANGED, handler)
-    return () => ipcRenderer.removeListener(IpcChannels.CONFIG_CHANGED, handler)
-  },
 }
 
 const promptsAPI = {
-  getAll: (): Promise<SystemPrompt[]> => 
+  getAll: (): Promise<SystemPrompt[]> =>
     ipcRenderer.invoke(IpcChannels.PROMPTS_GET_ALL),
   
-  getBuiltin: (): Promise<SystemPrompt[]> => 
-    ipcRenderer.invoke(IpcChannels.PROMPTS_GET_BUILTIN),
+  getByType: (type: PromptType): Promise<SystemPrompt[]> =>
+    ipcRenderer.invoke(IpcChannels.PROMPTS_GET_BY_TYPE, type),
   
-  getCustom: (): Promise<SystemPrompt[]> => 
-    ipcRenderer.invoke(IpcChannels.PROMPTS_GET_CUSTOM),
-  
-  getById: (id: string): Promise<SystemPrompt | undefined> => 
-    ipcRenderer.invoke(IpcChannels.PROMPTS_GET_BY_ID, id),
-  
-  add: (prompt: Omit<SystemPrompt, 'id' | 'createdAt' | 'updatedAt'>): Promise<SystemPrompt> => 
+  add: (prompt: Omit<SystemPrompt, 'id' | 'createdAt' | 'updatedAt'>): Promise<SystemPrompt> =>
     ipcRenderer.invoke(IpcChannels.PROMPTS_ADD, prompt),
   
-  update: (id: string, updates: Partial<SystemPrompt>): Promise<SystemPrompt | null> => 
+  update: (id: string, updates: Partial<SystemPrompt>): Promise<SystemPrompt | null> =>
     ipcRenderer.invoke(IpcChannels.PROMPTS_UPDATE, id, updates),
   
-  delete: (id: string): Promise<boolean> => 
+  delete: (id: string): Promise<boolean> =>
     ipcRenderer.invoke(IpcChannels.PROMPTS_DELETE, id),
-  
-  getByType: (type: PromptType): Promise<SystemPrompt[]> => 
-    ipcRenderer.invoke(IpcChannels.PROMPTS_GET_BY_TYPE, type),
-}
-
-interface SessionConfig {
-  mode: 'single'
-  sessionTimeout: number
-  maxMessagesPerSession: number
-  deleteAfterTimeout: boolean
-  maxSessionsPerAccount: number
-}
-
-interface SessionRecord {
-  id: string
-  providerId: string
-  accountId: string
-  providerSessionId: string
-  parentMessageId?: string
-  sessionType: 'chat' | 'agent'
-  messages: any[]
-  createdAt: number
-  lastActiveAt: number
-  status: 'active' | 'expired' | 'deleted'
-  model?: string
 }
 
 const sessionAPI = {
-  getConfig: (): Promise<SessionConfig> => 
-    ipcRenderer.invoke(IpcChannels.SESSION_GET_CONFIG),
+  create: (config?: Partial<SessionConfig>): Promise<SessionRecord> =>
+    ipcRenderer.invoke(IpcChannels.SESSION_CREATE, config),
   
-  updateConfig: (config: Partial<SessionConfig>): Promise<void> => 
-    ipcRenderer.invoke(IpcChannels.SESSION_UPDATE_CONFIG, config),
+  get: (id: string): Promise<SessionRecord | null> =>
+    ipcRenderer.invoke(IpcChannels.SESSION_GET, id),
   
-  getAll: (): Promise<SessionRecord[]> => 
+  getAll: (): Promise<SessionRecord[]> =>
     ipcRenderer.invoke(IpcChannels.SESSION_GET_ALL),
   
-  getActive: (): Promise<SessionRecord[]> => 
-    ipcRenderer.invoke(IpcChannels.SESSION_GET_ACTIVE),
+  update: (id: string, updates: Partial<SessionRecord>): Promise<SessionRecord | null> =>
+    ipcRenderer.invoke(IpcChannels.SESSION_UPDATE, id, updates),
   
-  getById: (id: string): Promise<SessionRecord | undefined> => 
-    ipcRenderer.invoke(IpcChannels.SESSION_GET_BY_ID, id),
-  
-  getByAccount: (accountId: string): Promise<SessionRecord[]> => 
-    ipcRenderer.invoke(IpcChannels.SESSION_GET_BY_ACCOUNT, accountId),
-  
-  getByProvider: (providerId: string): Promise<SessionRecord[]> => 
-    ipcRenderer.invoke(IpcChannels.SESSION_GET_BY_PROVIDER, providerId),
-  
-  delete: (id: string): Promise<boolean> => 
+  delete: (id: string): Promise<boolean> =>
     ipcRenderer.invoke(IpcChannels.SESSION_DELETE, id),
   
-  clearAll: (): Promise<void> => 
+  getStats: (): Promise<{ total: number; active: number; archived: number }> =>
+    ipcRenderer.invoke(IpcChannels.SESSION_GET_STATS),
+  
+  clearAll: (): Promise<void> =>
     ipcRenderer.invoke(IpcChannels.SESSION_CLEAR_ALL),
   
-  cleanExpired: (): Promise<number> => 
+  cleanExpired: (): Promise<number> =>
     ipcRenderer.invoke(IpcChannels.SESSION_CLEAN_EXPIRED),
 }
 
-interface ManagementApiConfig {
-  enableManagementApi: boolean
-  managementApiSecret: string
-  managementApiPort?: number
-}
-
-interface ContextManagementConfig {
-  enabled: boolean
-  strategies: {
-    slidingWindow: {
-      enabled: boolean
-      maxMessages: number
-    }
-    tokenLimit: {
-      enabled: boolean
-      maxTokens: number
-    }
-    summary: {
-      enabled: boolean
-      keepRecentMessages: number
-      summaryPrompt?: string
-    }
-  }
-  executionOrder: ('slidingWindow' | 'tokenLimit' | 'summary')[]
-}
-
 const managementApiAPI = {
-  getConfig: (): Promise<ManagementApiConfig> => 
+  getConfig: (): Promise<ManagementApiConfig> =>
     ipcRenderer.invoke(IpcChannels.MANAGEMENT_API_GET_CONFIG),
   
-  updateConfig: (updates: Partial<ManagementApiConfig>): Promise<ManagementApiConfig> => 
+  updateConfig: (updates: Partial<ManagementApiConfig>): Promise<ManagementApiConfig> =>
     ipcRenderer.invoke(IpcChannels.MANAGEMENT_API_UPDATE_CONFIG, updates),
   
-  generateSecret: (): Promise<string> => 
+  generateSecret: (): Promise<ManagementApiConfig> =>
     ipcRenderer.invoke(IpcChannels.MANAGEMENT_API_GENERATE_SECRET),
 }
 
 const contextManagementAPI = {
-  getConfig: (): Promise<ContextManagementConfig> => 
+  getConfig: (): Promise<any> =>
     ipcRenderer.invoke(IpcChannels.CONTEXT_MANAGEMENT_GET_CONFIG),
   
-  updateConfig: (updates: Partial<ContextManagementConfig>): Promise<ContextManagementConfig> => 
+  updateConfig: (updates: any): Promise<any> =>
     ipcRenderer.invoke(IpcChannels.CONTEXT_MANAGEMENT_UPDATE_CONFIG, updates),
-}
-
-function resolveLocalManagementApiBaseUrl(config: AppConfig): string {
-  const configuredHost = config.proxyHost || '127.0.0.1'
-  const host = configuredHost === '0.0.0.0' || configuredHost === '::' || configuredHost === '[::]'
-    ? '127.0.0.1'
-    : configuredHost
-
-  return `http://${host}:${config.proxyPort}/v0/management`
 }
 
 const toolCallingAPI = {
@@ -673,6 +596,44 @@ const toolCallingAPI = {
   },
 }
 
+// ============================================================
+// SCRIPTS API — direct child_process execution in preload
+// Bypasses IPC entirely to avoid handler registration issues
+// ============================================================
+const scriptsAPI = {
+  run: (scriptPath: string): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
+    return new Promise((resolve) => {
+      const ext = scriptPath.split('.').pop()?.toLowerCase()
+      let command: string
+      if (ext === 'py') {
+        command = `python3 "${scriptPath}"`
+      } else if (ext === 'js') {
+        command = `node "${scriptPath}"`
+      } else if (ext === 'sh') {
+        command = `bash "${scriptPath}"`
+      } else {
+        resolve({ stdout: '', stderr: `Unsupported script type: .${ext}`, exitCode: 1 })
+        return
+      }
+
+      exec(command, { timeout: 120000 }, (error, stdout, stderr) => {
+        if (error) {
+          resolve({
+            stdout: (error as any).stdout || stdout || '',
+            stderr: (error as any).stderr || stderr || error.message || 'Unknown error',
+            exitCode: (error as any).code || 1,
+          })
+        } else {
+          resolve({ stdout: stdout || '', stderr: stderr || '', exitCode: 0 })
+        }
+      })
+    })
+  },
+
+  list: (): Promise<{ name: string; path: string; description: string }[]> =>
+    ipcRenderer.invoke(IpcChannels.SCRIPTS_LIST),
+}
+
 const trayAPI = {
   openDashboard: (): void => 
     ipcRenderer.send('tray:open-dashboard'),
@@ -682,6 +643,13 @@ const trayAPI = {
 
   quitApp: (): void =>
     ipcRenderer.send('tray:quit-app'),
+}
+
+// --- helpers ---
+function resolveLocalManagementApiBaseUrl(config: AppConfig): string {
+  const host = config.managementApiHost || '127.0.0.1'
+  const port = config.managementApiPort || 19825
+  return `http://${host}:${port}`
 }
 
 const electronAPI = {
@@ -700,6 +668,7 @@ const electronAPI = {
   managementApi: managementApiAPI,
   contextManagement: contextManagementAPI,
   toolCalling: toolCallingAPI,
+  scripts: scriptsAPI,
   tray: trayAPI,
   
   on: (channel: string, callback: (...args: unknown[]) => void) => {
@@ -712,11 +681,9 @@ const electronAPI = {
     ipcRenderer.send(channel, ...args)
   },
   
-  invoke: (channel: string, ...args: unknown[]) => {
+  invoke: (channel: string, ...args: unknown[]): Promise<unknown> => {
     return ipcRenderer.invoke(channel, ...args)
   },
 }
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI)
-
-export type ElectronAPI = typeof electronAPI

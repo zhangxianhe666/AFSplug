@@ -15,6 +15,7 @@
     "apiKeys": "API Key",
     "logs": "日志",
     "session": "会话管理",
+    "scripts": "脚本中心",
     "settings": "设置",
     "about": "关于"
   },
@@ -909,6 +910,32 @@
     "resetError": "恢复默认失败",
     "confirmReset": "确定要恢复默认模型吗？这将删除所有自定义模型和排除设置。",
     "confirmDelete": "确定要删除此模型吗？"
+  },
+
+  "scripts": {
+    "title": "脚本中心",
+    "description": "管理和运行项目维护脚本，一键执行常用操作",
+    "run": "运行",
+    "lastRun": "上次运行",
+    "refreshGLMToken": "GLM Token 自动刷新",
+    "refreshGLMTokenDesc": "从 Chrome 提取最新 chatglm_refresh_token 并更新到 Chat2API 数据文件，支持自动定时刷新",
+    "prebuildCheck": "构建前检查",
+    "prebuildCheckDesc": "在正式构建前检查必需文件和 package.json 配置完整性",
+    "checkArtifacts": "检查构建产物",
+    "checkArtifactsDesc": "扫描 TypeScript 源文件旁的编译产物 (.js/.d.ts)，避免打包时冲突",
+    "release": "发布管理",
+    "releaseDesc": "交互式版本发布流程：选择版本号、创建 Git Tag、推送触发 GitHub Actions 自动构建",
+    "pathHint": "脚本路径",
+    "pathHintDesc": "所有脚本位于项目的 scripts 目录下",
+    "pathExample": "scripts/（自动从应用资源中解析路径）",
+    "categoryToken": "认证令牌",
+    "categoryBuild": "构建工具",
+    "categoryDev": "开发工具",
+    "categoryUtility": "实用工具",
+    "autoRefresh": "自动刷新",
+    "autoRefreshHelp": "定时自动运行此脚本",
+    "output": "输出结果",
+    "error": "错误信息"
   },
   "about": {
     "tagline": "多平台 AI 服务统一管理工具",

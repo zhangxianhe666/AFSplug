@@ -14,6 +14,7 @@ const Logs = lazy(() => import('@/pages/Logs'))
 const Settings = lazy(() => import('@/pages/Settings').then(m => ({ default: m.Settings })))
 const About = lazy(() => import('@/pages/About').then(m => ({ default: m.About })))
 const SessionManagement = lazy(() => import('@/pages/SessionManagement').then(m => ({ default: m.SessionManagement })))
+const Scripts = lazy(() => import('@/pages/Scripts').then(m => ({ default: m.Scripts })))
 
 function PageLoader() {
   return (
@@ -41,6 +42,7 @@ function App() {
           <Route path="/api-keys" element={<Suspense fallback={<PageLoader />}><ApiKeys /></Suspense>} />
           <Route path="/logs" element={<Suspense fallback={<PageLoader />}><Logs /></Suspense>} />
           <Route path="/session" element={<Suspense fallback={<PageLoader />}><SessionManagement /></Suspense>} />
+          <Route path="/scripts" element={<Suspense fallback={<PageLoader />}><Scripts /></Suspense>} />
           <Route path="/settings" element={<Suspense fallback={<PageLoader />}><Settings /></Suspense>} />
           <Route path="/about" element={<Suspense fallback={<PageLoader />}><About /></Suspense>} />
         </Route>
