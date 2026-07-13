@@ -247,8 +247,8 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "xiaoY233",
-      "repo": "Chat2API"
+      "owner": "zhangxianhe666",
+      "repo": "AFSplug"
     }
   }
 }
