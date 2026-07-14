@@ -1014,6 +1014,54 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
   oauthManager.on('progress', (event) => {
     mainWindow?.webContents.send(IpcChannels.OAUTH_PROGRESS, event)
   })
+
+  // Scripts handlers
+  ipcMain.handle(IpcChannels.SCRIPTS_RUN, async (_event, scriptPath: string): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
+    try {
+      const ext = scriptPath.split('.').pop()?.toLowerCase()
+      let command: string
+      if (ext === 'py') {
+        command = `python3 "${scriptPath}"`
+      } else if (ext === 'js') {
+        command = `node "${scriptPath}"`
+      } else if (ext === 'sh') {
+        command = `bash "${scriptPath}"`
+      } else {
+        return { stdout: '', stderr: `Unsupported script type: .${ext}`, exitCode: 1 }
+      }
+      
+      const { stdout, stderr } = await execAsync(command, {
+        cwd: app.getAppPath().replace('/app.asar', '').replace('/app.asar.unpacked', ''),
+        timeout: 120000,
+      })
+      return { stdout, stderr, exitCode: 0 }
+    } catch (error: any) {
+      return {
+        stdout: error.stdout || '',
+        stderr: error.stderr || error.message || 'Unknown error',
+        exitCode: error.code || 1,
+      }
+    }
+  })
+
+  ipcMain.handle(IpcChannels.SCRIPTS_LIST, async (): Promise<{ name: string; path: string; description: string }[]> => {
+    const fs = await import('fs')
+    const path = await import('path')
+    const scriptsDir = path.join(app.getAppPath().replace('/app.asar', '').replace('/app.asar.unpacked', ''), 'scripts')
+    
+    try {
+      const files = fs.readdirSync(scriptsDir)
+      return files
+        .filter(f => /\.(py|js|sh)$/.test(f))
+        .map(f => ({
+          name: f,
+          path: path.join(scriptsDir, f),
+          description: '',
+        }))
+    } catch {
+      return []
+    }
+  })
 }
 
 export function getProxyStatus(): ProxyStatus {
@@ -1067,53 +1115,5 @@ function registerErrorRecoveryHandlers(mainWindow: BrowserWindow | null): void {
   ipcMain.handle(IpcChannels.APP_CLOSE, async (): Promise<void> => {
     app.isQuitting = true
     mainWindow?.close()
-  })
-
-  // Scripts handlers
-  ipcMain.handle(IpcChannels.SCRIPTS_RUN, async (_event, scriptPath: string): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-    try {
-      const ext = scriptPath.split('.').pop()?.toLowerCase()
-      let command: string
-      if (ext === 'py') {
-        command = `python3 "${scriptPath}"`
-      } else if (ext === 'js') {
-        command = `node "${scriptPath}"`
-      } else if (ext === 'sh') {
-        command = `bash "${scriptPath}"`
-      } else {
-        return { stdout: '', stderr: `Unsupported script type: .${ext}`, exitCode: 1 }
-      }
-      
-      const { stdout, stderr } = await execAsync(command, {
-        cwd: app.getAppPath().replace('/app.asar', '').replace('/app.asar.unpacked', ''),
-        timeout: 120000,
-      })
-      return { stdout, stderr, exitCode: 0 }
-    } catch (error: any) {
-      return {
-        stdout: error.stdout || '',
-        stderr: error.stderr || error.message || 'Unknown error',
-        exitCode: error.code || 1,
-      }
-    }
-  })
-
-  ipcMain.handle(IpcChannels.SCRIPTS_LIST, async (): Promise<{ name: string; path: string; description: string }[]> => {
-    const fs = await import('fs')
-    const path = await import('path')
-    const scriptsDir = path.join(app.getAppPath().replace('/app.asar', '').replace('/app.asar.unpacked', ''), 'scripts')
-    
-    try {
-      const files = fs.readdirSync(scriptsDir)
-      return files
-        .filter(f => /\.(py|js|sh)$/.test(f))
-        .map(f => ({
-          name: f,
-          path: path.join(scriptsDir, f),
-          description: '',
-        }))
-    } catch {
-      return []
-    }
   })
 }
