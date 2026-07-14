@@ -1,6 +1,4 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import { exec } from 'child_process'
-import path from 'path'
 import { IpcChannels } from '../main/ipc/channels'
 import type { 
   Provider, 
@@ -598,41 +596,12 @@ const toolCallingAPI = {
 }
 
 // ============================================================
-// SCRIPTS API — direct child_process execution in preload
-// Bypasses IPC entirely to avoid handler registration issues
+// SCRIPTS API — routes through main process IPC
+// Main process has app.getAppPath() for reliable path resolution
 // ============================================================
 const scriptsAPI = {
-  run: (scriptPath: string): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-    return new Promise((resolve) => {
-      const ext = scriptPath.split('.').pop()?.toLowerCase()
-      let command: string
-      if (ext === 'py') {
-        command = `python3 "${scriptPath}"`
-      } else if (ext === 'js') {
-        command = `node "${scriptPath}"`
-      } else if (ext === 'sh') {
-        command = `bash "${scriptPath}"`
-      } else {
-        resolve({ stdout: '', stderr: `Unsupported script type: .${ext}`, exitCode: 1 })
-        return
-      }
-
-      const baseDir = (typeof (process as any).resourcesPath === 'string' && (process as any).resourcesPath)
-        || path.dirname(__dirname)
-
-      exec(command, { timeout: 120000, cwd: baseDir }, (error, stdout, stderr) => {
-        if (error) {
-          resolve({
-            stdout: (error as any).stdout || stdout || '',
-            stderr: (error as any).stderr || stderr || error.message || 'Unknown error',
-            exitCode: (error as any).code || 1,
-          })
-        } else {
-          resolve({ stdout: stdout || '', stderr: stderr || '', exitCode: 0 })
-        }
-      })
-    })
-  },
+  run: (scriptPath: string): Promise<{ stdout: string; stderr: string; exitCode: number }> =>
+    ipcRenderer.invoke(IpcChannels.SCRIPTS_RUN, scriptPath),
 
   list: (): Promise<{ name: string; path: string; description: string }[]> =>
     ipcRenderer.invoke(IpcChannels.SCRIPTS_LIST),
