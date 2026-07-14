@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { exec } from 'child_process'
+import path from 'path'
 import { IpcChannels } from '../main/ipc/channels'
 import type { 
   Provider, 
@@ -616,7 +617,10 @@ const scriptsAPI = {
         return
       }
 
-      exec(command, { timeout: 120000 }, (error, stdout, stderr) => {
+      const baseDir = (typeof (process as any).resourcesPath === 'string' && (process as any).resourcesPath)
+        || path.dirname(__dirname)
+
+      exec(command, { timeout: 120000, cwd: baseDir }, (error, stdout, stderr) => {
         if (error) {
           resolve({
             stdout: (error as any).stdout || stdout || '',
