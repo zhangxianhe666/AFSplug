@@ -24,13 +24,13 @@ import { PerplexityAdapter } from '../proxy/adapters/perplexity'
 import { QwenAdapter } from '../proxy/adapters/qwen'
 import { QwenAiAdapter } from '../proxy/adapters/qwen-ai'
 import { ZaiAdapter } from '../proxy/adapters/zai'
-import { exec } from 'child_process'
+import { execFile } from 'child_process'
 import { promisify } from 'util'
 import type { Provider, Account, ProxyStatus, ProviderCheckResult, OAuthResult, AuthType, CredentialField, LogLevel, LogEntry, ProviderVendor, AppConfig } from '../../shared/types'
 import type { SystemPrompt, SessionConfig, SessionRecord, ManagementApiConfig } from '../store/types'
 import type { ProviderType } from '../oauth/types'
 
-const execAsync = promisify(exec)
+const execFileAsync = promisify(execFile)
 
 let proxyServer: ProxyServer | null = null
 let proxyStartTime: number | null = null
@@ -1019,18 +1019,22 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
   ipcMain.handle(IpcChannels.SCRIPTS_RUN, async (_event, scriptPath: string): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
     try {
       const ext = scriptPath.split('.').pop()?.toLowerCase()
-      let command: string
+      let bin: string
+      let args: string[]
       if (ext === 'py') {
-        command = `python3 "${scriptPath}"`
+        bin = 'python3'
+        args = [scriptPath]
       } else if (ext === 'js') {
-        command = `node "${scriptPath}"`
+        bin = 'node'
+        args = [scriptPath]
       } else if (ext === 'sh') {
-        command = `bash "${scriptPath}"`
+        bin = 'bash'
+        args = [scriptPath]
       } else {
         return { stdout: '', stderr: `Unsupported script type: .${ext}`, exitCode: 1 }
       }
       
-      const { stdout, stderr } = await execAsync(command, {
+      const { stdout, stderr } = await execFileAsync(bin, args, {
         cwd: app.getAppPath().replace('/app.asar', '').replace('/app.asar.unpacked', ''),
         timeout: 120000,
       })
