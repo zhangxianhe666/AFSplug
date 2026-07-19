@@ -11,7 +11,6 @@ import {
   PanelLeftOpen,
   Key,
   Cpu,
-  Info,
   MessageSquare,
   AlertTriangle,
   TerminalSquare,
@@ -45,7 +44,6 @@ const navItems: NavItem[] = [
   { titleKey: 'nav.apiKeys', href: '/api-keys', icon: Key },
   { titleKey: 'nav.logs', href: '/logs', icon: FileText },
   { titleKey: 'nav.settings', href: '/settings', icon: Settings },
-  { titleKey: 'nav.about', href: '/about', icon: Info },
 ]
 
 function Tooltip({ label, children }: { label: string; children: React.ReactNode }) {
