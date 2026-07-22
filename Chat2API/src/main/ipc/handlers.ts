@@ -1019,23 +1019,32 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
   ipcMain.handle(IpcChannels.SCRIPTS_RUN, async (_event, scriptPath: string): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
     try {
       const ext = scriptPath.split('.').pop()?.toLowerCase()
+      const isWindows = process.platform === 'win32'
       let bin: string
       let args: string[]
       if (ext === 'py') {
-        bin = 'python3'
+        // Windows: python or py, macOS/Linux: python3
+        bin = isWindows ? 'python' : 'python3'
         args = [scriptPath]
       } else if (ext === 'js') {
         bin = 'node'
         args = [scriptPath]
       } else if (ext === 'sh') {
+        if (isWindows) {
+          return { stdout: '', stderr: 'Shell scripts (.sh) are not supported on Windows. Please use .bat or .ps1 instead.', exitCode: 1 }
+        }
         bin = 'bash'
         args = [scriptPath]
       } else {
         return { stdout: '', stderr: `Unsupported script type: .${ext}`, exitCode: 1 }
       }
-      
+
+      // Cross-platform app path: strip app.asar / app.asar.unpacked suffix
+      const appPath = app.getAppPath()
+      const cwd = appPath.replace(/[\\/]app\.asar(?:\.unpacked)?$/, '')
+
       const { stdout, stderr } = await execFileAsync(bin, args, {
-        cwd: app.getAppPath().replace('/app.asar', '').replace('/app.asar.unpacked', ''),
+        cwd,
         timeout: 120000,
       })
       return { stdout, stderr, exitCode: 0 }
@@ -1051,7 +1060,8 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
   ipcMain.handle(IpcChannels.SCRIPTS_LIST, async (): Promise<{ name: string; path: string; description: string }[]> => {
     const fs = await import('fs')
     const path = await import('path')
-    const scriptsDir = path.join(app.getAppPath().replace('/app.asar', '').replace('/app.asar.unpacked', ''), 'scripts')
+    const appPath = app.getAppPath()
+    const scriptsDir = path.join(appPath.replace(/[\\/]app\.asar(?:\.unpacked)?$/, ''), 'scripts')
     
     try {
       const files = fs.readdirSync(scriptsDir)

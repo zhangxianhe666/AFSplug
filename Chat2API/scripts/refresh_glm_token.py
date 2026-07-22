@@ -53,7 +53,8 @@ def extract_token():
 def open_login_page():
     """打开智谱清言网页让用户登录"""
     print("[INFO] 正在打开智谱清言网页 (https://chatglm.cn) ...")
-    subprocess.run(["open", GLM_LOGIN_URL], check=False)
+    import webbrowser
+    webbrowser.open(GLM_LOGIN_URL)
 
 
 # ── Step 2: 加密/解密 data.json ────────────────────────────────
