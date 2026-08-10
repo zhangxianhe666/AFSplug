@@ -69,10 +69,10 @@
 
 | 平台                    | 下载文件                                   |
 | --------------------- | -------------------------------------- |
-| macOS (Apple Silicon) | `Chat2API-x.x.x-arm64.dmg`             |
-| macOS (Intel)         | `Chat2API-x.x.x-x64.dmg`               |
-| Windows               | `Chat2API-x.x.x-x64-setup.exe`         |
-| Linux                 | `Chat2API-x.x.x-x64.AppImage` 或 `.deb` |
+| macOS (Apple Silicon) | `afs-x.x.x-arm64.dmg`             |
+| macOS (Intel)         | `afs-x.x.x-x64.dmg`               |
+| Windows               | `afs-x.x.x-x64-setup.exe`         |
+| Linux                 | `afs-x.x.x-x64.AppImage` 或 `.deb` |
 
 ### 从源码构建
 

@@ -153,7 +153,7 @@
       ],
       "category": "public.app-category.utilities",
       "icon": "build/icon.png",
-      "artifactName": "${productName}-${version}-mac-${arch}.${ext}",
+      "artifactName": "afs-${version}-mac-${arch}.${ext}",
       "hardenedRuntime": true,
       "gatekeeperAssess": false
     },
@@ -187,7 +187,7 @@
         }
       ],
       "icon": "build/icon.ico",
-      "artifactName": "${productName}-${version}-${arch}-setup.${ext}"
+      "artifactName": "afs-${version}-${arch}-setup.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -200,10 +200,10 @@
       "createStartMenuShortcut": true,
       "shortcutName": "Chat2API",
       "license": "LICENSE",
-      "artifactName": "${productName}-${version}-${arch}-setup.${ext}"
+      "artifactName": "afs-${version}-${arch}-setup.${ext}"
     },
     "portable": {
-      "artifactName": "${productName}-${version}-${arch}-portable.${ext}"
+      "artifactName": "afs-${version}-${arch}-portable.${ext}"
     },
     "linux": {
       "target": [
@@ -230,7 +230,7 @@
       "category": "Utility",
       "icon": "build/icon.png",
       "maintainer": "Chat2API Team <support@chat2api.com>",
-      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "artifactName": "afs-${version}-${arch}.${ext}",
       "desktop": {
         "Name": "Chat2API",
         "Comment": "统一管理多个 AI 服务提供商",
@@ -239,11 +239,11 @@
       }
     },
     "appImage": {
-      "artifactName": "${productName}-${version}-${arch}.${ext}"
+      "artifactName": "afs-${version}-${arch}.${ext}"
     },
     "deb": {
       "priority": "optional",
-      "artifactName": "${productName}-${version}-${arch}.${ext}"
+      "artifactName": "afs-${version}-${arch}.${ext}"
     },
     "publish": {
       "provider": "github",
