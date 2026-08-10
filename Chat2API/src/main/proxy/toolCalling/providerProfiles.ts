@@ -1,5 +1,6 @@
 import type { NormalizedToolResult, ToolProtocolId } from './types.ts'
 import { managedXmlProtocol } from './protocols/managedXml.ts'
+import { managedBracketProtocol } from './protocols/managedBracket.ts'
 
 export interface ProviderToolProfile {
   providerId: 'deepseek' | 'kimi' | 'glm' | 'qwen' | string
@@ -22,6 +23,18 @@ const chat2ApiXmlHistoryProfile: Omit<ProviderToolProfile, 'providerId'> = {
   },
 }
 
+const chat2ApiBracketHistoryProfile: Omit<ProviderToolProfile, 'providerId'> = {
+  managedSupport: true,
+  supportsNativeTools: false,
+  preferredManagedProtocol: 'managed_bracket',
+  formatAssistantToolCalls(calls) {
+    return managedBracketProtocol.formatAssistantToolCalls(calls)
+  },
+  formatToolResult(result) {
+    return managedBracketProtocol.formatToolResult(result)
+  },
+}
+
 const profiles: Record<string, ProviderToolProfile> = {
   deepseek: {
     providerId: 'deepseek',
@@ -29,7 +42,7 @@ const profiles: Record<string, ProviderToolProfile> = {
   },
   kimi: {
     providerId: 'kimi',
-    ...chat2ApiXmlHistoryProfile,
+    ...chat2ApiBracketHistoryProfile,
   },
   glm: {
     providerId: 'glm',

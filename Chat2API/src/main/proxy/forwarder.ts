@@ -639,6 +639,7 @@ export class RequestForwarder {
         temperature: request.temperature,
         enableThinking: !!request.reasoning_effort,
         enableWebSearch: !!request.web_search,
+        reasoning_effort: request.reasoning_effort || undefined,
       })
 
       const latency = Date.now() - startTime

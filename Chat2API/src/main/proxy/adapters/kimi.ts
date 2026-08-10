@@ -54,10 +54,14 @@ interface ChatCompletionRequest {
   temperature?: number
   enableThinking?: boolean
   enableWebSearch?: boolean
+  /** Reasoning effort level: 'low' | 'medium' | 'high' (maps to 快速/进阶) */
+  reasoning_effort?: string
   tools?: any[]
   tool_choice?: any
   conversationId?: string
   parentId?: string
+  /** Original model name before mapping (for feature detection) */
+  originalModel?: string
 }
 
 const accessTokenMap = new Map<string, TokenInfo>()
@@ -310,10 +314,11 @@ export class KimiAdapter {
     // Use originalModel for feature detection (preserves user's intent before mapping)
     const modelForDetection = request.originalModel || request.model
     const modelLower = modelForDetection.toLowerCase()
-    
+
     let enableThinking = request.enableThinking ?? false
     let enableWebSearch = request.enableWebSearch ?? false
-    
+    let reasoningEffort = request.reasoning_effort || undefined
+
     // Auto-enable based on model name (if not explicitly set)
     if (!enableThinking && (modelLower.includes('think') || modelLower.includes('r1'))) {
       enableThinking = true
@@ -324,11 +329,31 @@ export class KimiAdapter {
       console.log('[Kimi] Web search enabled (from model name)')
     }
 
+    // Auto-detect reasoning effort from model name suffix (Kimi3-adv, Kimi3-fast, etc.)
+    if (!reasoningEffort) {
+      if (modelLower.includes('-adv') || modelLower.includes('-advanced')) {
+        enableThinking = true
+        reasoningEffort = 'high'
+        console.log('[Kimi] Reasoning effort "high" (进阶) from model name')
+      } else if (modelLower.includes('-fast') || modelLower.includes('-quick')) {
+        enableThinking = true
+        reasoningEffort = 'low'
+        console.log('[Kimi] Reasoning effort "low" (快速) from model name')
+      }
+    }
+
+    // Auto-enable thinking if reasoning_effort is explicitly set (even without 'think' in name)
+    if (reasoningEffort && !enableThinking) {
+      enableThinking = true
+      console.log('[Kimi] Thinking mode enabled (reasoning_effort:', reasoningEffort + ')')
+    }
+
     const payload = createKimiChatPayload({
       model: request.model,
       content,
       enableWebSearch,
       enableThinking,
+      reasoning_effort: reasoningEffort,
     })
     const frameBuffer = encodeKimiGrpcFrame(payload)
 

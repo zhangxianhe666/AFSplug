@@ -29,10 +29,16 @@ export function resolveDeepSeekChatOptions(
   }
 }
 
-export type KimiScenario = 'SCENARIO_K2D5' | 'SCENARIO_K2D6'
+export type KimiScenario = 'SCENARIO_K3' | 'SCENARIO_K2D6' | 'SCENARIO_K2D5' | 'SCENARIO_K2'
 
 export function resolveKimiScenario(model: string): KimiScenario {
-  return model.toLowerCase().includes('k2.6') ? 'SCENARIO_K2D6' : 'SCENARIO_K2D5'
+  const lower = model.toLowerCase()
+  if (lower.includes('kimi-k3') || lower.includes('k3')) return 'SCENARIO_K3'
+  if (lower.includes('k2.6') || lower.includes('k2d6')) return 'SCENARIO_K2D6'
+  if (lower.includes('k2d5') || lower.includes('k2.5')) return 'SCENARIO_K2D5'
+  if (lower.includes('k2')) return 'SCENARIO_K2'
+  // Default to K3 for any unrecognized model (newest scenario)
+  return 'SCENARIO_K3'
 }
 
 export function createKimiChatPayload(options: {
@@ -40,8 +46,17 @@ export function createKimiChatPayload(options: {
   content: string
   enableWebSearch: boolean
   enableThinking: boolean
+  /** Reasoning effort level: 'low' | 'medium' | 'high' (maps to 快速/进阶) */
+  reasoning_effort?: string
 }) {
   const scenario = resolveKimiScenario(options.model)
+  const thinkingOptions: Record<string, unknown> = {}
+  if (options.enableThinking) {
+    thinkingOptions.thinking = true
+  }
+  if (options.reasoning_effort) {
+    thinkingOptions.reasoning_effort = options.reasoning_effort
+  }
 
   return {
     scenario,
@@ -56,9 +71,7 @@ export function createKimiChatPayload(options: {
       }],
       scenario,
     },
-    options: {
-      thinking: options.enableThinking
-    }
+    options: thinkingOptions
   }
 }
 

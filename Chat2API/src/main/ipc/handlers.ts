@@ -1023,8 +1023,31 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
       let bin: string
       let args: string[]
       if (ext === 'py') {
-        // Windows: python or py, macOS/Linux: python3
-        bin = isWindows ? 'python' : 'python3'
+        // Try python3 first (most macOS/Linux), then python, then py (Windows)
+        const pythonCandidates = isWindows
+          ? ['python3', 'python', 'py']
+          : ['python3', 'python']
+        let pythonBin: string | null = null
+        const { execFile } = await import('child_process')
+        for (const cand of pythonCandidates) {
+          try {
+            await new Promise<void>((resolve, reject) => {
+              const child = execFile(cand, ['--version'], { timeout: 5000 })
+              child.on('exit', (code) => code === 0 ? resolve() : reject())
+              child.on('error', reject)
+            })
+            pythonBin = cand
+            break
+          } catch { /* try next */ }
+        }
+        if (!pythonBin) {
+          return {
+            stdout: '',
+            stderr: `No Python interpreter found. Tried: ${pythonCandidates.join(', ')}. Please install Python 3 and ensure it is in your PATH.`,
+            exitCode: 1,
+          }
+        }
+        bin = pythonBin
         args = [scriptPath]
       } else if (ext === 'js') {
         bin = 'node'

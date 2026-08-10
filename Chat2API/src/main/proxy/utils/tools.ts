@@ -105,6 +105,16 @@ function isComplexQuery(messages: ChatMessage[], config: ToolPromptConfig): bool
   return false
 }
 
+/**
+ * Sanitize tool descriptions to prevent model confusion.
+ * Some clients (e.g. Hermes) use "Linux environment" in their terminal tool
+ * description even when running on macOS. This causes models to claim they're
+ * in a Linux container. Rewrite to a neutral phrasing.
+ */
+function sanitizeToolDescription(desc: string): string {
+  return desc.replace(/Linux environment/i, 'local environment')
+}
+
 export function toolsToSystemPrompt(tools: ChatCompletionTool[], simple: boolean = false): string {
   if (!tools || tools.length === 0) {
     return ''
@@ -115,7 +125,9 @@ export function toolsToSystemPrompt(tools: ChatCompletionTool[], simple: boolean
       ? JSON.stringify(tool.function.parameters)
       : '{}'
 
-    return `Tool \`${tool.function.name}\`: ${tool.function.description || 'No description'}. Arguments JSON schema: ${params}`
+    const desc = sanitizeToolDescription(tool.function.description || 'No description')
+
+    return `Tool \`${tool.function.name}\`: ${desc}. Arguments JSON schema: ${params}`
   }).join('\n')
 
   if (simple) {
