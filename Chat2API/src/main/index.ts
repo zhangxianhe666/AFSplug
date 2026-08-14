@@ -5,6 +5,7 @@ import { createTrayManager, TrayManager } from './tray/TrayManager'
 import { registerIpcHandlers } from './ipc/handlers'
 import { UpdaterManager } from './updater'
 import { storeManager } from './store/store'
+import { refreshKimiToken } from './tokenRefresh'
 
 // Prevent uncaught exceptions from crashing the app
 process.on('uncaughtException', (error) => {
@@ -101,8 +102,53 @@ async function setupApp(): Promise<void> {
 
   await loadAppContent(mainWindow)
 
+  // 应用运行期间自动保持 Kimi K3 token 新鲜：
+  // 每 5 分钟静默刷新一次（窗口不弹出）；无账户或会话未登录时静默跳过，
+  // 连续失败自动退避（5min → 10min → 30min），不打扰用户。
+  startKimiAutoRefresh()
+
   if (process.env.NODE_ENV === 'development') {
     openDevTools()
+  }
+}
+
+// ── Kimi K3 定时自动刷新 ──────────────────────────────────────────
+let kimiRefreshTimer: NodeJS.Timeout | null = null
+let kimiRefreshFailures = 0
+
+const KIMI_REFRESH_BASE_INTERVAL = 5 * 60 * 1000
+
+function scheduleNextKimiRefresh(delayMs: number): void {
+  kimiRefreshTimer = setTimeout(async () => {
+    try {
+      const result = await refreshKimiToken({ silent: true })
+      kimiRefreshFailures = result.success ? 0 : kimiRefreshFailures + 1
+      if (result.success) {
+        console.log('[KimiAutoRefresh] 定时刷新成功')
+      } else {
+        console.log(`[KimiAutoRefresh] 定时刷新跳过（${kimiRefreshFailures}）: ${result.message}`)
+      }
+    } catch (error: any) {
+      kimiRefreshFailures++
+      console.error('[KimiAutoRefresh] 定时刷新异常:', error?.message || error)
+    }
+    // 失败退避：成功 5min；连续失败 5min → 10min → 30min 封顶
+    const delays = [KIMI_REFRESH_BASE_INTERVAL, KIMI_REFRESH_BASE_INTERVAL, 10 * 60 * 1000, 30 * 60 * 1000]
+    const next = delays[Math.min(kimiRefreshFailures, delays.length - 1)]
+    scheduleNextKimiRefresh(next)
+  }, delayMs)
+}
+
+function startKimiAutoRefresh(): void {
+  if (kimiRefreshTimer) return
+  // 启动 1 分钟后先试一次（等 store/账户就绪），之后按退避策略循环
+  scheduleNextKimiRefresh(60 * 1000)
+}
+
+function stopKimiAutoRefresh(): void {
+  if (kimiRefreshTimer) {
+    clearTimeout(kimiRefreshTimer)
+    kimiRefreshTimer = null
   }
 }
 
@@ -126,6 +172,7 @@ async function loadAppContent(mainWindow: BrowserWindow): Promise<void> {
 
 function cleanup(): void {
   console.log('Application is exiting, performing cleanup...')
+  stopKimiAutoRefresh()
   storeManager.flushPendingWrites()
   const updaterManager = UpdaterManager.getInstance()
   updaterManager.destroy()

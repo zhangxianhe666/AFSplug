@@ -123,6 +123,9 @@ export const IpcChannels = {
 
   SCRIPTS_RUN: 'scripts:run',
   SCRIPTS_LIST: 'scripts:list',
+
+  KIMI_AUTO_REFRESH: 'kimi:autoRefresh',
+  GLM_AUTO_REFRESH: 'glm:autoRefresh',
 } as const
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels]

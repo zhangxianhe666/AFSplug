@@ -24,6 +24,10 @@ export interface InAppLoginOptions {
   providerType: ProviderType
   timeout?: number
   proxyMode?: 'system' | 'none'
+  /** Fixed session partition name. When set, cookies persist across restarts. */
+  partition?: string
+  /** When false, the window stays hidden (silent background token refresh). Default: true */
+  showWindow?: boolean
 }
 
 const DEFAULT_TIMEOUT = 300000 // 5 minutes
@@ -87,7 +91,7 @@ export class InAppLoginManager extends EventEmitter {
   private createLoginWindow(): void {
     if (!this.config) return
 
-    const partition = `persist:oauth-${Date.now()}`
+    const partition = this.options?.partition || `persist:oauth-${Date.now()}`
     this.loginSession = session.fromPartition(partition)
 
     if (this.options?.proxyMode === 'none') {
@@ -111,10 +115,13 @@ export class InAppLoginManager extends EventEmitter {
       autoHideMenuBar: true,
     })
 
-    this.loginWindow.once('ready-to-show', () => {
-      this.loginWindow?.show()
-      this.emit('status', { status: 'ready', message: 'Login window ready - please log in' })
-    })
+    // 静默模式（showWindow=false）下不显示窗口，后台加载页面即可捕获令牌
+    if (this.options?.showWindow !== false) {
+      this.loginWindow.once('ready-to-show', () => {
+        this.loginWindow?.show()
+        this.emit('status', { status: 'ready', message: 'Login window ready - please log in' })
+      })
+    }
 
     this.loginWindow.on('closed', () => {
       if (!this.isCompleted) {

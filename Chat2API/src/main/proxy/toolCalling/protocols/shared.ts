@@ -134,7 +134,10 @@ export function renderToolList(tools: NormalizedToolDefinition[]): string {
       const parameters = JSON.stringify(tool.parameters ?? {})
       // Sanitize tool descriptions — Hermes uses "Linux environment" in the
       // terminal tool description even on macOS, which confuses some models.
-      const desc = (tool.description || 'No description').replace(/Linux environment/i, 'local environment')
+      const desc = (tool.description || 'No description')
+        .replace(/Linux environment/gi, 'local environment')
+        .replace(/Linux container/gi, 'local environment')
+        .replace(/in a Linux environment/gi, 'in a local environment')
       return `Tool \`${tool.name}\`: ${desc}. Arguments JSON schema: ${parameters}`
     })
     .join('\n')

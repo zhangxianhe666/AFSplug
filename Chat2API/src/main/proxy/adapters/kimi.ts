@@ -6,7 +6,7 @@
 import axios, { AxiosResponse } from 'axios'
 import { Account, Provider } from '../../store/types'
 import { PassThrough } from 'stream'
-import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected } from '../utils/tools'
+import { toolsToSystemPrompt, TOOL_WRAP_HINT, hasToolPromptInjected, sanitizeToolDescription } from '../utils/tools'
 import { parseToolCallsFromText } from '../utils/toolParser'
 import { createBaseChunk } from '../utils/streamToolHandler'
 import { createKimiChatPayload, encodeKimiGrpcFrame } from './providerModelOptions'
@@ -198,6 +198,11 @@ export class KimiAdapter {
       return true
     })
 
+    // Sanitize system message to prevent model confusion about the runtime environment
+    if (systemContent) {
+      systemContent = sanitizeToolDescription(systemContent)
+    }
+
     let content = ''
 
     // Prepend system message if exists
@@ -307,13 +312,26 @@ export class KimiAdapter {
       }
     }
 
-    const content = this.messagesPrepare(messages, toolsPrompt, false)
+    let content = this.messagesPrepare(messages, toolsPrompt, false)
 
     // Determine if thinking and web search should be enabled
     // Priority: explicit parameters > model name detection
     // Use originalModel for feature detection (preserves user's intent before mapping)
     const modelForDetection = request.originalModel || request.model
     const modelLower = modelForDetection.toLowerCase()
+
+    // K3 tends to infer "Linux container" from Hermes tool descriptions mentioning
+    // "Linux environment". Override with an explicit positive assertion so the model
+    // never makes that inference.
+    const isK3 = modelLower.includes('kimi-k3') || modelLower.includes('k3')
+    if (isK3 && !content.includes('local machine') && !content.includes('本地环境')) {
+      content = `## Environment
+You are running on the user's local machine (macOS / Windows / Linux desktop).
+Your terminal tool executes commands on the user's actual computer, NOT in a container.
+Always refer to the user's real filesystem paths.
+
+${content}`
+    }
 
     let enableThinking = request.enableThinking ?? false
     let enableWebSearch = request.enableWebSearch ?? false

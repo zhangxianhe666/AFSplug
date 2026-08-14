@@ -25,20 +25,14 @@ export const useScriptsStore = create<ScriptsStoreState>()(
           lastRun: null,
           lastResult: null,
         },
-        prebuild_check: {
-          name: 'Pre-build Check',
+        k3_auto_refresh: {
+          name: 'K3 Auto Refresh',
           enabled: false,
           lastRun: null,
           lastResult: null,
         },
         check_source_artifacts: {
           name: 'Check Source Artifacts',
-          enabled: false,
-          lastRun: null,
-          lastResult: null,
-        },
-        release: {
-          name: 'Release',
           enabled: false,
           lastRun: null,
           lastResult: null,

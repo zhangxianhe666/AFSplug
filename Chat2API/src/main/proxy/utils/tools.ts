@@ -110,9 +110,13 @@ function isComplexQuery(messages: ChatMessage[], config: ToolPromptConfig): bool
  * Some clients (e.g. Hermes) use "Linux environment" in their terminal tool
  * description even when running on macOS. This causes models to claim they're
  * in a Linux container. Rewrite to a neutral phrasing.
+ * Also covers variations like "Linux container", "in a Linux environment", etc.
  */
-function sanitizeToolDescription(desc: string): string {
-  return desc.replace(/Linux environment/i, 'local environment')
+export function sanitizeToolDescription(desc: string): string {
+  return desc
+    .replace(/Linux environment/gi, 'local environment')
+    .replace(/Linux container/gi, 'local environment')
+    .replace(/in a Linux environment/gi, 'in a local environment')
 }
 
 export function toolsToSystemPrompt(tools: ChatCompletionTool[], simple: boolean = false): string {

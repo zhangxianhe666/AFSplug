@@ -95,7 +95,12 @@ export class KiloCodePromptAdapter extends BasePromptAdapter {
         ? JSON.stringify(tool.function.parameters)
         : '{}'
 
-      return `Tool \`${tool.function.name}\`: ${tool.function.description || 'No description'}. Arguments JSON schema: ${params}`
+      const desc = (tool.function.description || 'No description')
+        .replace(/Linux environment/gi, 'local environment')
+        .replace(/Linux container/gi, 'local environment')
+        .replace(/in a Linux environment/gi, 'in a local environment')
+
+      return `Tool \`${tool.function.name}\`: ${desc}. Arguments JSON schema: ${params}`
     }).join('\n')
 
     const template = variant?.toolPromptTemplate || KILOCODE_VARIANT.toolPromptTemplate

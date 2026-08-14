@@ -5,16 +5,12 @@ import {
   Play,
   RefreshCw,
   Clock,
-  CheckCircle2,
   XCircle,
   Loader2,
-  Key,
   Timer,
-  AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
 
@@ -35,19 +31,19 @@ const scripts: ScriptDefinition[] = [
     nameKey: 'scripts.refreshGLMToken',
     descKey: 'scripts.refreshGLMTokenDesc',
     icon: RefreshCw,
-    path: 'scripts/refresh_glm_token.py',
+    path: 'built-in',
     category: 'token',
     hasSchedule: true,
     defaultEnabled: false,
   },
   {
-    id: 'prebuild_check',
-    nameKey: 'scripts.prebuildCheck',
-    descKey: 'scripts.prebuildCheckDesc',
-    icon: CheckCircle2,
-    path: 'scripts/prebuild-check.js',
-    category: 'build',
-    hasSchedule: false,
+    id: 'k3_auto_refresh',
+    nameKey: 'scripts.k3AutoRefresh',
+    descKey: 'scripts.k3AutoRefreshDesc',
+    icon: RefreshCw,
+    path: 'built-in',
+    category: 'token',
+    hasSchedule: true,
     defaultEnabled: false,
   },
   {
@@ -56,16 +52,6 @@ const scripts: ScriptDefinition[] = [
     descKey: 'scripts.checkArtifactsDesc',
     icon: Clock,
     path: 'scripts/check-source-artifacts.js',
-    category: 'build',
-    hasSchedule: false,
-    defaultEnabled: false,
-  },
-  {
-    id: 'release',
-    nameKey: 'scripts.release',
-    descKey: 'scripts.releaseDesc',
-    icon: Key,
-    path: 'scripts/release.js',
     category: 'build',
     hasSchedule: false,
     defaultEnabled: false,
@@ -108,6 +94,30 @@ export function Scripts() {
 
     try {
       const api = window.electronAPI
+
+      // GLM / K3 自动刷新走应用内置实现（无需 python / Management API / launchd）：
+      // 首次自动弹窗登录，之后静默刷新，结果直接显示在卡片上
+      const providerRefreshChannels: Record<string, string> = {
+        refresh_glm_token: 'glm:autoRefresh',
+        k3_auto_refresh: 'kimi:autoRefresh',
+      }
+      const refreshChannel = providerRefreshChannels[scriptId]
+      if (refreshChannel) {
+        const res: any = await api?.invoke(refreshChannel)
+        const ok = !!res?.success
+        const text = res?.message || (ok ? '刷新成功' : '刷新失败')
+        setExecState(prev => ({
+          ...prev,
+          [scriptId]: {
+            running: false,
+            lastOutput: ok ? text : '',
+            lastError: ok ? '' : text,
+            lastRun: Date.now(),
+          },
+        }))
+        return
+      }
+
       // 获取已安装脚本的完整路径
       let resolvedPath = scriptPath
       if (availableScripts.length > 0) {
@@ -119,10 +129,12 @@ export function Scripts() {
         ? await api.scripts.run(resolvedPath)
         : await api?.invoke('scripts:run', resolvedPath)
           ?? { stdout: '', stderr: 'window.electronAPI 不可用，请在 Electron 环境中运行', exitCode: 1 }
-      const output = result.exitCode === 0 ? result.stdout : (result.stderr || result.stdout)
+      // Combine stdout+stderr for display; treat non-zero exit as error state
+      const combined = result.stdout + (result.stderr ? '\n' + result.stderr : '')
+      const hasError = result.exitCode !== 0
       setExecState(prev => ({
         ...prev,
-        [scriptId]: { running: false, lastOutput: output, lastError: result.exitCode !== 0 ? result.stderr : '', lastRun: Date.now() }
+        [scriptId]: { running: false, lastOutput: combined, lastError: hasError ? (result.stderr || result.stdout) : '', lastRun: Date.now() }
       }))
     } catch (error: any) {
       setExecState(prev => ({

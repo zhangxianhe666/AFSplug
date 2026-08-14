@@ -8,6 +8,7 @@ import { ProviderChecker } from '../providers/checker'
 import { CustomProviderManager } from '../providers/custom'
 import { getBuiltinProviders, getBuiltinProvider } from '../providers/builtin'
 import { oauthManager } from '../oauth/manager'
+import { refreshKimiToken, refreshGlmToken } from '../tokenRefresh'
 import { ProxyServer } from '../proxy/server'
 import { proxyStatusManager } from '../proxy/status'
 import { sessionManager } from '../proxy/sessionManager'
@@ -1015,6 +1016,35 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     mainWindow?.webContents.send(IpcChannels.OAUTH_PROGRESS, event)
   })
 
+  // Kimi K3 自动刷新（内置实现，无需 python / Management API）
+  // 点脚本中心「K3 自动刷新」卡片时调用：
+  //   首次：静默失败后自动弹窗登录；之后：静默刷新
+  ipcMain.handle(IpcChannels.KIMI_AUTO_REFRESH, async (_event, options?: { forceLogin?: boolean; silent?: boolean }) => {
+    try {
+      return await refreshKimiToken({
+        forceLogin: options?.forceLogin ?? false,
+        silent: options?.silent ?? false,
+      })
+    } catch (error: any) {
+      console.error('[KimiAutoRefresh IPC] Error:', error.message)
+      return { success: false, message: error?.message || String(error) }
+    }
+  })
+
+  // GLM 自动刷新（内置实现，无需 python / Management API）
+  // 点脚本中心「GLM Token 自动刷新」卡片时调用，逻辑与 K3 一致
+  ipcMain.handle(IpcChannels.GLM_AUTO_REFRESH, async (_event, options?: { forceLogin?: boolean; silent?: boolean }) => {
+    try {
+      return await refreshGlmToken({
+        forceLogin: options?.forceLogin ?? false,
+        silent: options?.silent ?? false,
+      })
+    } catch (error: any) {
+      console.error('[GLMAutoRefresh IPC] Error:', error.message)
+      return { success: false, message: error?.message || String(error) }
+    }
+  })
+
   // Scripts handlers
   ipcMain.handle(IpcChannels.SCRIPTS_RUN, async (_event, scriptPath: string): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
     try {
@@ -1066,16 +1096,16 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
       const appPath = app.getAppPath()
       const cwd = appPath.replace(/[\\/]app\.asar(?:\.unpacked)?$/, '')
 
-      const { stdout, stderr } = await execFileAsync(bin, args, {
+      const { stdout, stderr, exitCode } = await execFileAsync(bin, args, {
         cwd,
         timeout: 120000,
       })
-      return { stdout, stderr, exitCode: 0 }
+      return { stdout, stderr, exitCode: exitCode ?? 0 }
     } catch (error: any) {
       return {
         stdout: error.stdout || '',
         stderr: error.stderr || error.message || 'Unknown error',
-        exitCode: error.code || 1,
+        exitCode: error.code === 'ENOENT' ? 127 : (typeof error.code === 'number' ? error.code : 1),
       }
     }
   })

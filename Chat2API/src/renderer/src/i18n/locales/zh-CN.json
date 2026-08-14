@@ -414,7 +414,7 @@
     "mappingUpdatedPending": "模型映射 {{model}} 已修改（待保存）",
     "mappingDeletedPending": "模型映射 {{model}} 已删除（待保存）",
     "configSaved": "模型映射配置已保存",
-    "configSaveFailed": "无法保存配置，请重试",
+    "configSaveFailed": "保存配置失败",
     "unsavedChangesWarning": "您有未保存的更改，确定要离开吗？",
     "unsavedChangesHint": "您有未保存的更改，请点击保存按钮保存",
     "unsavedChangesTitle": "有未保存的更改",
@@ -492,12 +492,7 @@
     "restartNow": "立即重启",
     "restarting": "正在重启...",
     "proxyRestarted": "代理服务已使用新配置重启",
-    "proxyRestartFailed": "代理服务重启失败",
-    "validationFailed": "验证失败",
-    "fixFormErrors": "请修正表单中的错误",
-    "proxyConfigUpdated": "代理配置已更新",
-    "configSaveFailed": "保存配置失败",
-    "saving": "保存中..."
+    "proxyRestartFailed": "代理服务重启失败"
   },
   "apiKeys": {
     "title": "API Key 管理",
@@ -911,20 +906,15 @@
     "confirmReset": "确定要恢复默认模型吗？这将删除所有自定义模型和排除设置。",
     "confirmDelete": "确定要删除此模型吗？"
   },
-
   "scripts": {
     "title": "脚本中心",
     "description": "管理和运行项目维护脚本，一键执行常用操作",
     "run": "运行",
     "lastRun": "上次运行",
     "refreshGLMToken": "GLM Token 自动刷新",
-    "refreshGLMTokenDesc": "从 Chrome 提取最新 chatglm_refresh_token 并更新到 Chat2API 数据文件，支持自动定时刷新",
-    "prebuildCheck": "构建前检查",
-    "prebuildCheckDesc": "在正式构建前检查必需文件和 package.json 配置完整性",
+    "refreshGLMTokenDesc": "内置一键刷新 GLM 令牌：首次自动弹窗登录，之后静默刷新，无需 Python 环境",
     "checkArtifacts": "检查构建产物",
     "checkArtifactsDesc": "扫描 TypeScript 源文件旁的编译产物 (.js/.d.ts)，避免打包时冲突",
-    "release": "发布管理",
-    "releaseDesc": "交互式版本发布流程：选择版本号、创建 Git Tag、推送触发 GitHub Actions 自动构建",
     "pathHint": "脚本路径",
     "pathHintDesc": "所有脚本位于项目的 scripts 目录下",
     "pathExample": "scripts/（自动从应用资源中解析路径）",
@@ -935,7 +925,9 @@
     "autoRefresh": "自动刷新",
     "autoRefreshHelp": "定时自动运行此脚本",
     "output": "输出结果",
-    "error": "错误信息"
+    "error": "错误信息",
+    "k3AutoRefresh": "K3 自动刷新",
+    "k3AutoRefreshDesc": "内置一键刷新 Kimi K3 令牌：首次自动弹窗登录，之后静默刷新；应用运行期间每 5 分钟自动保持令牌新鲜，无需 Python 环境"
   },
   "about": {
     "tagline": "多平台 AI 服务统一管理工具",

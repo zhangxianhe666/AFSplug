@@ -277,7 +277,9 @@ export class OAuthManager extends EventEmitter {
     providerId: string,
     providerType: ProviderType,
     timeout?: number,
-    proxyMode?: 'system' | 'none'
+    proxyMode?: 'system' | 'none',
+    partition?: string,
+    showWindow: boolean = true,
   ): Promise<OAuthResult> {
     this.emit('statusChange', 'pending')
     this.sendProgressToRenderer({
@@ -521,6 +523,8 @@ export class OAuthManager extends EventEmitter {
         providerType,
         timeout: timeout || DEFAULT_TIMEOUT,
         proxyMode,
+        partition,
+        showWindow,
       }).then((result) => {
         if (!result.success) {
           completeHandler(result)
