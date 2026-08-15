@@ -27,7 +27,7 @@ const SESSION_PARTITIONS: Record<string, string> = {
 /** GLM 的 refresh token cookie 名（与 tokenExtractionConfig 一致） */
 const GLM_COOKIE_NAME = 'chatglm_refresh_token'
 
-const SILENT_TIMEOUT = 60_000    // 静默尝试上限（会话已登录时通常几秒完成）
+const SILENT_TIMEOUT = 20_000    // 静默尝试上限（会话已登录时通常几秒完成；未登录时尽快升级弹窗，避免用户干等）
 const GLM_SILENT_TIMEOUT = 30_000 // GLM 走 cookie 读取，页面加载完成即可
 const LOGIN_TIMEOUT = 300_000    // 可见登录窗口等待上限（5 分钟）
 

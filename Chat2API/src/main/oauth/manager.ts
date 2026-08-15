@@ -331,7 +331,6 @@ export class OAuthManager extends EventEmitter {
 
       const tokenFoundHandler = async (event: { key: string; value: string; allCookies?: Record<string, string> }) => {
         console.log('[OAuthManager] tokenFoundHandler called, isValidating:', isValidating, 'event:', event.key, event.value.substring(0, 50) + '...')
-
         // Store the token
         collectedTokens[event.key] = event.value
         
@@ -526,6 +525,7 @@ export class OAuthManager extends EventEmitter {
         partition,
         showWindow,
       }).then((result) => {
+        console.log('[OAuthManager] startLogin settled:', JSON.stringify(result))
         if (!result.success) {
           completeHandler(result)
         }

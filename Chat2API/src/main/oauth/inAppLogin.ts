@@ -7,6 +7,17 @@ import { BrowserWindow, session, Session } from 'electron'
 import { EventEmitter } from 'events'
 import { ProviderType } from './types'
 import { TokenExtractionConfig, getTokenExtractionConfig, TokenSource } from './tokenExtractionConfig'
+import * as fs from 'fs'
+import * as path from 'path'
+
+/** 调试日志（追加写入 ~/.chat2api/logs/inapplogin-debug.log），排查弹窗一闪而过问题 */
+function dbg(msg: string): void {
+  try {
+    const dir = path.join(require('os').homedir(), '.chat2api', 'logs')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.appendFileSync(path.join(dir, 'inapplogin-debug.log'), `${new Date().toISOString()} [InAppLogin] ${msg}\n`)
+  } catch { /* ignore */ }
+}
 
 export interface InAppLoginResult {
   success: boolean
@@ -44,18 +55,24 @@ export class InAppLoginManager extends EventEmitter {
   private loginStartTime: number = 0
   private lastTokenCheckTime: number = 0
   private options: InAppLoginOptions | null = null
+  /** complete() 主动关闭窗口时置 true，允许 close 事件放行（拦截页面脚本自关） */
+  private allowClose: boolean = false
 
   constructor() {
     super()
   }
 
   async startLogin(options: InAppLoginOptions): Promise<InAppLoginResult> {
+    dbg(`startLogin called: provider=${options.providerType} showWindow=${options.showWindow} timeout=${options.timeout}`)
     if (this.loginWindow) {
+      dbg('startLogin REJECTED: login window already open')
       return {
         success: false,
         error: 'A login window is already open',
       }
     }
+
+    this.allowClose = false // 重置：新窗口只允许 complete() 主动关闭，拦截页面脚本自关
 
     this.config = getTokenExtractionConfig(options.providerType)
     if (!this.config) {
@@ -93,6 +110,7 @@ export class InAppLoginManager extends EventEmitter {
 
     const partition = this.options?.partition || `persist:oauth-${Date.now()}`
     this.loginSession = session.fromPartition(partition)
+    dbg(`createLoginWindow: partition=${partition} showWindow=${this.options?.showWindow}`)
 
     if (this.options?.proxyMode === 'none') {
       this.loginSession.setProxy({ mode: 'direct' }).catch((error) => {
@@ -114,16 +132,34 @@ export class InAppLoginManager extends EventEmitter {
       title: this.config.windowTitle || 'Login',
       autoHideMenuBar: true,
     })
+    // 闭包引用当前窗口：旧窗口的 closed 事件可能延迟触发（异步），
+    // 若此时 this.loginWindow 已指向新窗口，必须忽略，否则会误杀新弹窗。
+    const currentWindow = this.loginWindow
 
     // 静默模式（showWindow=false）下不显示窗口，后台加载页面即可捕获令牌
+    // 弹窗模式（默认）：立即显示窗口，不依赖 ready-to-show —— kimi.com 未登录时
+    // 会重定向登录页且加载缓慢，ready-to-show 可能迟迟不触发导致窗口一直隐藏，
+    // 用户看不到弹窗、干等超时（曾现"未捕获到令牌，请确认已在窗口中完成登录"）。
     if (this.options?.showWindow !== false) {
-      this.loginWindow.once('ready-to-show', () => {
-        this.loginWindow?.show()
-        this.emit('status', { status: 'ready', message: 'Login window ready - please log in' })
+      currentWindow.show()
+      currentWindow.focus()
+      this.emit('status', { status: 'ready', message: 'Login window ready - please log in' })
+      currentWindow.once('ready-to-show', () => {
+        if (this.loginWindow === currentWindow && !currentWindow.isDestroyed()) {
+          currentWindow.show()
+          currentWindow.focus()
+        }
       })
     }
 
-    this.loginWindow.on('closed', () => {
+    currentWindow.on('closed', () => {
+      dbg(`window closed event (isCompleted=${this.isCompleted}, isCurrent=${this.loginWindow === currentWindow})`)
+      // 旧窗口的 closed 事件可能在新窗口创建后延迟触发，此时 this.loginWindow 已指向新窗口，
+      // 必须忽略——否则会误判"登录窗口被关闭"，把刚弹出的新窗口杀掉（弹窗一闪而过）。
+      if (this.loginWindow !== currentWindow) {
+        dbg('ignoring stale closed event from previous window')
+        return
+      }
       if (!this.isCompleted) {
         this.complete({
           success: false,
@@ -132,11 +168,35 @@ export class InAppLoginManager extends EventEmitter {
       }
     })
 
-    this.loginWindow.loadURL(this.config.loginUrl).catch((error) => {
-      this.complete({
-        success: false,
-        error: `Failed to load login page: ${error.message}`,
-      })
+    // 追踪窗口生命周期：页面加载/失败/被脚本自关
+    currentWindow.webContents.on('did-finish-load', () => {
+      dbg(`did-finish-load: ${currentWindow.webContents.getURL()}`)
+    })
+    currentWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
+      dbg(`did-fail-load: code=${code} desc=${desc} url=${url}`)
+    })
+
+    // 防护：页面脚本 window.close() 在 Electron 里会直接关闭 BrowserWindow，
+    // 导致登录窗口"一闪而过"。只允许本模块 complete() 主动关闭，其余一律拦截。
+    currentWindow.on('close', (event) => {
+      if (!this.allowClose) {
+        dbg('close event BLOCKED (page script attempted window.close?)')
+        event.preventDefault()
+      } else {
+        dbg('close event allowed (complete() initiated)')
+      }
+    })
+
+    currentWindow.loadURL(this.config.loginUrl).catch((error) => {
+      // 不立即 complete 关窗：保留窗口让用户看到加载失败状态，由 timeout 自然收尾。
+      // 立即关窗会导致"弹窗一闪而过"且无任何提示。
+      dbg(`loadURL FAILED: ${error.message}`)
+      console.error('[InAppLogin] Failed to load login page:', error.message)
+      this.emit('status', { status: 'error', message: `页面加载失败: ${error.message}` })
+      if (this.options?.showWindow !== false && this.loginWindow === currentWindow && !currentWindow.isDestroyed()) {
+        currentWindow.show()
+        currentWindow.focus()
+      }
     })
   }
 
@@ -489,6 +549,7 @@ export class InAppLoginManager extends EventEmitter {
   }
 
   private complete(result: InAppLoginResult): void {
+    dbg(`complete() called: success=${result.success} error=${result.error || 'none'} isCompleted=${this.isCompleted}`)
     if (this.isCompleted) return
     this.isCompleted = true
 
@@ -498,6 +559,8 @@ export class InAppLoginManager extends EventEmitter {
     }
 
     if (this.loginWindow && !this.loginWindow.isDestroyed()) {
+      dbg('complete(): closing login window')
+      this.allowClose = true
       this.loginWindow.close()
     }
 
