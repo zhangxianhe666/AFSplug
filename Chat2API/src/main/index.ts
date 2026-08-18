@@ -24,6 +24,14 @@ if (process.platform === 'darwin' && process.arch === 'arm64') {
   app.commandLine.appendSwitch('disable-gpu-sandbox')
 }
 
+// 静默刷新（隐藏窗口/屏幕外窗口）时，Chromium 的 occlusion tracking 会把窗口
+// 标记为 hidden，kimi.com 等 SPA 检测到 document.hidden 就不初始化、不发 API
+// 请求，导致 onBeforeSendHeaders 拦截不到 token（曾现：隐藏窗口 35s 超时、
+// 屏幕外窗口也超时，只有真正可见的弹窗 9s 成功）。
+// 禁用"窗口被遮挡即降级为后台"的行为，让屏幕外/隐藏窗口的页面保持
+// visibilityState=visible，JS 正常执行。
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
+
 // Automatically add --no-sandbox flag when running as root user
 if (process.getuid && process.getuid() === 0) {
   console.log('Detected running as root user, sandbox settings have been automatically handled')
@@ -132,10 +140,10 @@ function scheduleNextKimiRefresh(delayMs: number): void {
       kimiRefreshFailures++
       console.error('[KimiAutoRefresh] 定时刷新异常:', error?.message || error)
     }
-    // 失败退避：成功 5min；连续失败 5min → 10min → 30min 封顶
-    const delays = [KIMI_REFRESH_BASE_INTERVAL, KIMI_REFRESH_BASE_INTERVAL, 10 * 60 * 1000, 30 * 60 * 1000]
-    const next = delays[Math.min(kimiRefreshFailures, delays.length - 1)]
-    scheduleNextKimiRefresh(next)
+    // 失败退避：Kimi token 有效期仅 15 分钟，退避超过 5 分钟会让 token 在重试前
+    // 就过期（曾现 5→10→30min 退避导致 16:19 刷新成功后 17:36 仍 401）。
+    // 失败也固定 5 分钟重试，最多让 token 过期一个周期即可续上。
+    scheduleNextKimiRefresh(KIMI_REFRESH_BASE_INTERVAL)
   }, delayMs)
 }
 

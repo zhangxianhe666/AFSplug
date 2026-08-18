@@ -27,7 +27,7 @@ const SESSION_PARTITIONS: Record<string, string> = {
 /** GLM 的 refresh token cookie 名（与 tokenExtractionConfig 一致） */
 const GLM_COOKIE_NAME = 'chatglm_refresh_token'
 
-const SILENT_TIMEOUT = 20_000    // 静默尝试上限（会话已登录时通常几秒完成；未登录时尽快升级弹窗，避免用户干等）
+const SILENT_TIMEOUT = 35_000    // 静默尝试上限（页面加载 + SPA 初始化 + API 请求需要时间；太短会在 token 发出前就超时）
 const GLM_SILENT_TIMEOUT = 30_000 // GLM 走 cookie 读取，页面加载完成即可
 const LOGIN_TIMEOUT = 300_000    // 可见登录窗口等待上限（5 分钟）
 
@@ -118,7 +118,9 @@ async function captureToken(
     return null
   }
 
-  // Kimi：依赖网络请求头拦截
+  // Kimi：依赖网络请求头拦截，另加 cookie store 兜底读取 kimi-auth
+  // （隐藏/屏幕外窗口下 SPA 可能不发请求，但持久会话的 cookie 里始终有最新
+  //   JWT —— kimi-auth，直接读与 Authorization 头等价）
   const result = await oauthManager.startInAppLogin(
     'kimi-auto',
     'kimi' as any,
@@ -129,6 +131,17 @@ async function captureToken(
   )
   if (!result.success || !result.credentials) {
     console.log(`[TokenRefresh:kimi] capture failed: ${result.error || 'no credentials'}`)
+    // 兜底：从会话 cookie store 读 kimi-auth
+    try {
+      const cookies = await session.fromPartition(partition).cookies.get({ name: 'kimi-auth' })
+      const value = cookies[0]?.value
+      if (value) {
+        console.log('[TokenRefresh:kimi] captured kimi-auth via cookie store')
+        return value
+      }
+    } catch (e) {
+      console.log('[TokenRefresh:kimi] kimi-auth cookie read error:', e)
+    }
     return null
   }
   return result.credentials.token || result.credentials.accessToken || null

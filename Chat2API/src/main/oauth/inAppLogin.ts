@@ -3,7 +3,7 @@
  * Manages in-app browser window for OAuth login and token extraction
  */
 
-import { BrowserWindow, session, Session } from 'electron'
+import { BrowserWindow, session, Session, screen } from 'electron'
 import { EventEmitter } from 'events'
 import { ProviderType } from './types'
 import { TokenExtractionConfig, getTokenExtractionConfig, TokenSource } from './tokenExtractionConfig'
@@ -57,6 +57,10 @@ export class InAppLoginManager extends EventEmitter {
   private options: InAppLoginOptions | null = null
   /** complete() 主动关闭窗口时置 true，允许 close 事件放行（拦截页面脚本自关） */
   private allowClose: boolean = false
+  /** 轮询 localStorage 拿新 token 的定时器（kimi.com 用 refresh_token 换新后写入） */
+  private localStoragePollTimer: NodeJS.Timeout | null = null
+  /** 是否已强制刷新过一次 access_token（防止无限 reload 循环） */
+  private forceTokenRefreshDone: boolean = false
 
   constructor() {
     super()
@@ -73,6 +77,7 @@ export class InAppLoginManager extends EventEmitter {
     }
 
     this.allowClose = false // 重置：新窗口只允许 complete() 主动关闭，拦截页面脚本自关
+    this.forceTokenRefreshDone = false // 重置：新会话允许强制刷新一次
 
     this.config = getTokenExtractionConfig(options.providerType)
     if (!this.config) {
@@ -128,6 +133,10 @@ export class InAppLoginManager extends EventEmitter {
         partition,
         webSecurity: true,
         javascript: true,
+        // 静默刷新（showWindow=false）时窗口不可见，默认 backgroundThrottling 会节流
+        // 页面 JS，SPA 初始化/API 请求不执行，导致 onBeforeSendHeaders 拦截不到
+        // Authorization 头而超时失败（曾现：静默 20s 抓不到，弹窗 9s 就抓到）。
+        backgroundThrottling: false,
       },
       title: this.config.windowTitle || 'Login',
       autoHideMenuBar: true,
@@ -150,6 +159,18 @@ export class InAppLoginManager extends EventEmitter {
           currentWindow.focus()
         }
       })
+    } else {
+      // 静默模式：窗口移到屏幕外并显示（不抢焦点）。
+      // 关键：kimi.com 的 SPA 检测 document.hidden —— 窗口 show:false 时页面认为
+      // 不可见，JS 初始化/API 请求不执行，onBeforeSendHeaders 永远拦截不到
+      // Authorization 头（曾现：隐藏窗口 35s 超时，弹窗 9s 就捕获成功；
+      // backgroundThrottling:false 也无效，因为这是 visibility 检测不是节流）。
+      // 屏幕外可见窗口：页面认为可见、正常发请求，用户看不到、不打扰。
+      try {
+        const wa = screen.getPrimaryDisplay().workArea
+        currentWindow.setPosition(wa.x - 6000, wa.y - 6000)
+      } catch { /* ignore */ }
+      currentWindow.showInactive()
     }
 
     currentWindow.on('closed', () => {
@@ -171,6 +192,27 @@ export class InAppLoginManager extends EventEmitter {
     // 追踪窗口生命周期：页面加载/失败/被脚本自关
     currentWindow.webContents.on('did-finish-load', () => {
       dbg(`did-finish-load: ${currentWindow.webContents.getURL()}`)
+      // 诊断：确认页面可见性状态 + localStorage 里有哪些 key（找 token 存储位置）
+      currentWindow.webContents.executeJavaScript(
+        `(function(){
+           function dec(t){ try { const p = JSON.parse(atob(t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))); return { exp: p.exp, iat: p.iat }; } catch(e){ return null; } }
+           const at = localStorage.getItem('access_token');
+           const rt = localStorage.getItem('refresh_token');
+           return JSON.stringify({
+             vis: document.visibilityState,
+             at_len: at ? at.length : 0,
+             at_exp: at ? dec(at) : null,
+             rt_len: rt ? rt.length : 0,
+             rt_exp: rt ? dec(rt) : null,
+             keys: Object.keys(localStorage).slice(0,30)
+           });
+         })()`,
+      ).then((r: string) => dbg(`diag: ${r}`)).catch(() => {})
+      // kimi.com 的 JWT 存在 localStorage（access_token），SPA 加载后会用
+      // refresh_token 自动换新并写回 localStorage。轮询读取，避免依赖
+      // Authorization 头拦截（隐藏/屏幕外窗口下 SPA 不发请求，但可见后
+      // 会自己刷新 token）。
+      this.startLocalStoragePoll()
     })
     currentWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
       dbg(`did-fail-load: code=${code} desc=${desc} url=${url}`)
@@ -320,6 +362,82 @@ export class InAppLoginManager extends EventEmitter {
 
   private hasMinTimePassed(): boolean {
     return Date.now() - this.loginStartTime >= MIN_LOGIN_TIME
+  }
+
+  /**
+   * 轮询 localStorage 的 access_token / refresh_token。
+   * kimi.com 的 JWT 存在 localStorage，SPA 加载后会用 refresh_token 自动换新并写回。
+   * 每 2 秒读一次，找到有效（未过期）的 access_token 就 emit tokenFound 并停止。
+   * 也接受 refresh_token 作为兜底（某些场景 access_token 可能不在 localStorage）。
+   */
+  private startLocalStoragePoll(): void {
+    this.stopLocalStoragePoll()
+    let attempts = 0
+    const maxAttempts = 20 // 40 秒
+    this.localStoragePollTimer = setInterval(async () => {
+      attempts++
+      if (this.isCompleted) {
+        this.stopLocalStoragePoll()
+        return
+      }
+      if (!this.loginWindow || this.loginWindow.isDestroyed()) {
+        this.stopLocalStoragePoll()
+        return
+      }
+      const wc = this.loginWindow.webContents
+      if (wc.isDestroyed()) {
+        this.stopLocalStoragePoll()
+        return
+      }
+      try {
+        const value: string | null = await wc.executeJavaScript(
+          `(function(){
+             function dec(t){ try { const p = JSON.parse(atob(t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))); return { exp: p.exp }; } catch(e){ return null; } }
+             const now = Math.floor(Date.now()/1000);
+             const at = localStorage.getItem('access_token');
+             if (at && at.length > 50) {
+               const d = dec(at);
+               if (d && d.exp > now + 300) return JSON.stringify({ ok: true, key: 'access_token', v: at, exp: d.exp });
+               // access_token 存在但快过期/已过期 → 需要强制换新
+               return JSON.stringify({ ok: false, needRefresh: true, at_exp: d ? d.exp : 0 });
+             }
+             return JSON.stringify({ ok: false, needRefresh: true, at_exp: 0 });
+           })()`,
+        )
+        if (value) {
+          const parsed = JSON.parse(value)
+          if (parsed.ok && parsed.v) {
+            console.log(`[InAppLogin] Polled ${parsed.key} from localStorage, exp:`, parsed.exp)
+            // 统一 emit 为 'token'：无论 access_token 还是 refresh_token，
+            // 走 OAuthManager 验证/保存流程时都按 token 处理
+            this.emit('tokenFound', { key: 'token', value: parsed.v })
+            this.stopLocalStoragePoll()
+            return
+          }
+          if (parsed.needRefresh && !this.forceTokenRefreshDone) {
+            // access_token 不新鲜：删掉并 reload，逼 SPA 用 refresh_token 换新。
+            // 只强制一次，reload 后 did-finish-load 会重新启动轮询。
+            console.log('[InAppLogin] access_token stale, forcing refresh (remove + reload)')
+            this.forceTokenRefreshDone = true
+            this.stopLocalStoragePoll()
+            wc.executeJavaScript(`localStorage.removeItem('access_token'); location.reload();`).catch(() => {})
+            return
+          }
+        }
+      } catch (e) {
+        console.log('[InAppLogin] localStorage poll error:', e)
+      }
+      if (attempts >= maxAttempts) {
+        this.stopLocalStoragePoll()
+      }
+    }, 2000)
+  }
+
+  private stopLocalStoragePoll(): void {
+    if (this.localStoragePollTimer) {
+      clearInterval(this.localStoragePollTimer)
+      this.localStoragePollTimer = null
+    }
   }
 
   private delayedTokenCheck(): void {
@@ -557,6 +675,8 @@ export class InAppLoginManager extends EventEmitter {
       clearTimeout(this.timeoutId)
       this.timeoutId = null
     }
+
+    this.stopLocalStoragePoll()
 
     if (this.loginWindow && !this.loginWindow.isDestroyed()) {
       dbg('complete(): closing login window')
