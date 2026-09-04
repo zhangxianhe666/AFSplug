@@ -250,7 +250,7 @@
   },
   "glm": {
     "name": "GLM",
-    "description": "智谱清言 AI 助手，支持 GLM-5.2 和 GLM-5.1 模型、深度思考和联网搜索",
+    "description": "智谱清言 AI 助手（chatglm.cn），GLM-5.3 普通模式 / GLM-5.3-thinking 深度思考模式",
     "refreshToken": "刷新令牌",
     "refreshTokenPlaceholder": "请输入智谱清言刷新令牌",
     "refreshTokenHelp": "从智谱清言网页版获取 chatglm_refresh_token，可在浏览器开发者工具 Application -> Cookie 中找到"

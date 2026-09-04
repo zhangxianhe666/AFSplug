@@ -34,6 +34,65 @@ function shouldDeleteSession(): boolean {
   return sessionManager.shouldDeleteAfterChat()
 }
 
+/**
+ * Convert a non-streaming chat.completion result into an OpenAI-compatible SSE stream.
+ * Used by forwardGLM: GLM web streams emit incremental parts that shred text XML,
+ * so streaming requests are collected non-streamingly and re-emitted as SSE.
+ */
+function resultToSSE(result: any): PassThrough {
+  const transStream = new PassThrough()
+  try {
+    const msg = result?.choices?.[0]?.message ?? {}
+    const choice = result?.choices?.[0] ?? {}
+    const created = result?.created ?? Math.floor(Date.now() / 1000)
+    const model = result?.model ?? ''
+    const id = result?.id ?? ''
+    const base = { id, model, object: 'chat.completion.chunk', created }
+
+    if (msg.reasoning_content) {
+      transStream.write(
+        `data: ${JSON.stringify({
+          ...base,
+          choices: [{ index: 0, delta: { reasoning_content: msg.reasoning_content }, finish_reason: null }],
+        })}\n\n`
+      )
+    }
+
+    if (msg.content) {
+      transStream.write(
+        `data: ${JSON.stringify({
+          ...base,
+          choices: [{ index: 0, delta: { role: 'assistant', content: String(msg.content) }, finish_reason: null }],
+        })}\n\n`
+      )
+    }
+
+    if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+      transStream.write(
+        `data: ${JSON.stringify({
+          ...base,
+          choices: [{ index: 0, delta: { role: 'assistant', tool_calls: msg.tool_calls }, finish_reason: null }],
+        })}\n\n`
+      )
+    }
+
+    transStream.write(
+      `data: ${JSON.stringify({
+        ...base,
+        choices: [{ index: 0, delta: {}, finish_reason: choice.finish_reason ?? 'stop' }],
+      })}\n\n`
+    )
+
+    if (result?.usage) {
+      transStream.write(`data: ${JSON.stringify({ ...base, choices: [], usage: result.usage })}\n\n`)
+    }
+  } catch (err) {
+    console.error('[GLM] resultToSSE error:', err)
+  }
+  transStream.end('data: [DONE]\n\n')
+  return transStream
+}
+
 type ProviderForwarder = {
   name: string
   matches: (provider: Provider) => boolean
@@ -564,30 +623,30 @@ export class RequestForwarder {
       const handler = new GLMStreamHandler(actualModel, undefined, undefined, transformed.plan)
       
       if (request.stream) {
-        const transformedStream = await handler.handleStream(response.data)
-        
+        // GLM web 流式输出的是增量 part，会把文本 XML 拆碎导致实时解析失败。
+        // 统一收集完整响应（非流式路径在 finish 事件拿到完整 part），解析后再转 SSE。
+        const result = await handler.handleNonStream(response.data)
+
+        this.applyToolCallsToResponse(result, transformed)
+
         // If delete session after chat is enabled, we need to handle it after stream ends
         if (shouldDeleteSession()) {
-          const originalEnd = transformedStream.end.bind(transformedStream)
-          transformedStream.end = function(chunk?: any, encoding?: any, callback?: any) {
-            const convId = handler.getConversationId()
-            if (convId) {
-              adapter.deleteConversation(convId).catch(err => {
-                console.error('[GLM] Failed to delete session:', err)
-              })
-            }
-            return originalEnd(chunk, encoding, callback)
+          const convId = handler.getConversationId()
+          if (convId) {
+            await adapter.deleteConversation(convId)
           }
         }
-        
+
+        const sseStream = resultToSSE(result)
+
         return {
           success: true,
           status: response.status,
           headers: this.extractHeaders(response.headers),
-          stream: transformedStream,
+          stream: sseStream,
           skipTransform: true,
           latency,
-          providerSessionId: handler.getConversationId(),
+          providerSessionId: handler.getConversationId() ?? undefined,
         }
       }
 

@@ -250,7 +250,7 @@
   },
   "glm": {
     "name": "GLM",
-    "description": "Zhipu Qingyan AI Assistant, supports GLM-5.2 and GLM-5.1 models, deep thinking and web search",
+    "description": "Zhipu Qingyan AI Assistant (chatglm.cn). GLM-5.3 normal mode / GLM-5.3-thinking deep thinking mode",
     "refreshToken": "Refresh Token",
     "refreshTokenPlaceholder": "Enter chatglm_refresh_token",
     "refreshTokenHelp": "Get chatglm_refresh_token from Zhipu Qingyan web version, found in browser DevTools Application -> Cookie"

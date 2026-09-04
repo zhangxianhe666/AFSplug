@@ -97,3 +97,59 @@ test('codex responses adapter parses response item function call', () => {
   assert.equal(result.toolCalls.length, 1)
   assert.equal(result.toolCalls[0].id, 'call_1')
 })
+
+test('managed xml recovers a tool call when a parameter close tag is malformed', () => {
+  // GLM-5.2 实测输出：description 参数闭合标签损坏（混入其它格式的 </arg_value>），
+  // 整个块未闭合。只要 command 参数完整，就应恢复工具调用而非泄漏整段 XML。
+  const result = managedXmlProtocol.parse(
+    '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="filePath"><![CDATA[/tmp/a]]></|CHAT2API|parameter><|CHAT2API|parameter name="description"><![CDATA[Read a file</arg_value>',
+    { tools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 1)
+  assert.equal(result.toolCalls[0].function.name, 'default_api:read_file')
+  assert.equal(JSON.parse(result.toolCalls[0].function.arguments).filePath, '/tmp/a')
+})
+
+test('managed xml does not fabricate a call from bare text that merely mentions an invoke tag', () => {
+  // 宽容提取必须要求至少一个完整闭合的 parameter，避免把普通文本误判为工具调用。
+  const result = managedXmlProtocol.parse(
+    '请参考 <|CHAT2API|invoke name="default_api:read_file"> 的格式说明，但不要真的调用。',
+    { tools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 0)
+})
+
+test('managed xml fuzzy-corrects hallucinated tool names (case, underscore, substring)', () => {
+  // 模型轻微幻觉工具名（大小写/下划线/前后缀），模糊匹配应纠正为注册名。
+  const cases: Array<[string, string]> = [
+    ['<|CHAT2API|tool_calls><|CHAT2API|invoke name="Default_api:Read_File"><|CHAT2API|parameter name="filePath">/tmp/a</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>', 'default_api:read_file'],
+    ['<|CHAT2API|tool_calls><|CHAT2API|invoke name="defaultapireadfile"><|CHAT2API|parameter name="filePath">/tmp/a</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>', 'default_api:read_file'],
+  ]
+  for (const [xml, expected] of cases) {
+    const result = managedXmlProtocol.parse(xml, { tools, protocol: 'managed_xml' })
+    assert.equal(result.toolCalls.length, 1, `should recover from: ${xml}`)
+    assert.equal(result.toolCalls[0].function.name, expected)
+  }
+})
+
+test('managed xml still rejects tool names that cannot be matched', () => {
+  const result = managedXmlProtocol.parse(
+    '<|CHAT2API|tool_calls><|CHAT2API|invoke name="totally_unrelated_tool"><|CHAT2API|parameter name="x">1</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+    { tools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 0)
+  assert.deepEqual(result.invalidToolNames, ['totally_unrelated_tool'])
+})
+
+test('managed bracket fuzzy-corrects tool name case', () => {
+  const result = managedBracketProtocol.parse(
+    '[function_calls][call:Default_api:Read_File]{"filePath":"/tmp/a"}[/call][/function_calls]',
+    { tools, protocol: 'managed_bracket' },
+  )
+
+  assert.equal(result.toolCalls.length, 1)
+  assert.equal(result.toolCalls[0].function.name, 'default_api:read_file')
+})

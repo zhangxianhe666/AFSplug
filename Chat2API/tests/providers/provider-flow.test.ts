@@ -178,8 +178,9 @@ test('DeepSeek provider config uses Web 2.0 browser headers', () => {
 })
 
 test('GLM, Kimi, and MiniMax built-in default models match current web providers', () => {
-  assert.deepEqual(glmConfig.supportedModels, ['GLM-5.1'])
-  assert.equal(glmConfig.modelMappings?.['GLM-5.1'], 'glm-5.1')
+  assert.deepEqual(glmConfig.supportedModels, ['GLM-5.3', 'GLM-5.3-thinking'])
+  assert.equal(glmConfig.modelMappings?.['GLM-5.3'], 'glm-5.3')
+  assert.equal(glmConfig.modelMappings?.['GLM-5.3-thinking'], 'glm-5.3-thinking')
 
   assert.deepEqual(kimiConfig.supportedModels, ['Kimi-K2.6'])
   assert.equal(kimiConfig.modelMappings?.['Kimi-K2.6'], 'kimi-k2.6')

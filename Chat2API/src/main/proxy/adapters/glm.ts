@@ -492,13 +492,14 @@ GLM STRICT RULES:
     let chatMode = ''
     let isNetworking = false
 
-    // Use request parameters for mode control (OpenAI compatible)
-    // GLM-5.2 uses 'thinking', GLM-5.1 uses 'zero' for reasoning mode
+    // 模式选择（OpenAI compatible）：
+    //   模型名含 "thinking"（如 GLM-5.3-thinking）→ chat_mode='thinking'（深度思考）
+    //   否则（如 GLM-5.3）→ chat_mode='zero'（普通回复）
     const modelForDetection = request.originalModel || request.model
     const modelLower = modelForDetection.toLowerCase()
+    const isThinking = modelLower.includes('thinking') || modelLower.includes('think')
     if (request.reasoning_effort) {
-      const isGLM52 = modelLower.includes('5.2') || modelLower.includes('glm-5.2')
-      chatMode = isGLM52 ? 'thinking' : 'zero'
+      chatMode = isThinking ? 'thinking' : 'zero'
       console.log('[GLM] Using reasoning mode, effort:', request.reasoning_effort, 'chatMode:', chatMode)
     }
     
@@ -513,8 +514,8 @@ GLM STRICT RULES:
     }
 
     // Fallback: check model name for backward compatibility
-    if (!chatMode && (modelLower.includes('think') || modelLower.includes('zero'))) {
-      chatMode = modelLower.includes('5.2') ? 'thinking' : 'zero'
+    if (!chatMode && isThinking) {
+      chatMode = 'thinking'
       console.log('[GLM] Using reasoning mode (from model name)')
     }
     if (!chatMode && modelLower.includes('deepresearch')) {
@@ -738,6 +739,8 @@ export class GLMStreamHandler {
       })}\n\n`
     )
 
+    const emittedNativeToolCallIds = new Set<string>()
+
     const parser = createParser({
       onEvent: (event: any) => {
         try {
@@ -778,6 +781,7 @@ export class GLMStreamHandler {
             let counter = 1
             let fullText = ''
             let fullReasoning = ''
+            const nativeToolCalls: any[] = []
 
             cachedParts.forEach((part) => {
               const { content, meta_data } = part
@@ -814,6 +818,24 @@ export class GLMStreamHandler {
                   partText += '```python\n' + code + (part.status === 'finish' ? '\n```\n' : '')
                 } else if (type === 'execution_output' && typeof innerContent === 'string' && part.status === 'finish') {
                   partText += innerContent + '\n'
+                } else if (type === 'tool_calls' && value.tool_calls && typeof value.tool_calls === 'object') {
+                  // GLM web 原生结构化工具调用 part（chatglm.cn 输出 JSON 对象而非文本 XML）
+                  const tc = value.tool_calls
+                  const tcName = String(tc.name || '')
+                  // 白名单校验：只透传 Chat2API 注入的工具，过滤 GLM web 原生工具（open_url/finish 等）
+                  const allowedNames = new Set((this.toolCallingPlan?.tools ?? []).map((t: any) => t.name))
+                  if (allowedNames.size > 0 && !allowedNames.has(tcName)) {
+                    console.log(`[GLM] Filtered native tool call not in allowed list: ${tcName}`)
+                  } else {
+                    nativeToolCalls.push({
+                      id: tc.id || `call_${nativeToolCalls.length}`,
+                      type: 'function',
+                      function: {
+                        name: tcName,
+                        arguments: typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments ?? {}),
+                      },
+                    })
+                  }
                 }
               })
 
@@ -839,21 +861,40 @@ export class GLMStreamHandler {
             if (chunk) {
               sentContent += chunk
             }
-            
-            // Process tool call interception with shared parser buffering.
+
+            // 原生结构化 tool_calls part 优先：有工具调用时抑制文本输出
+            const newNativeCalls = nativeToolCalls.filter((tc: any) => !emittedNativeToolCallIds.has(tc.id))
+            for (const tc of newNativeCalls) emittedNativeToolCallIds.add(tc.id)
+
             const baseChunk = createBaseChunk(this.conversationId, this.model, this.created)
-            const outputChunks = this.toolStreamParser?.push(chunk, baseChunk, !sentRole) ?? (
-              chunk ? [{
-                ...baseChunk,
-                choices: [{ index: 0, delta: { ...(!sentRole ? { role: 'assistant' } : {}), content: chunk }, finish_reason: null }],
-              }] : []
-            )
 
-            for (const outChunk of outputChunks) {
-              transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+            if (newNativeCalls.length > 0) {
+              transStream.write(
+                `data: ${JSON.stringify({
+                  ...baseChunk,
+                  choices: [{
+                    index: 0,
+                    delta: { ...(!sentRole ? { role: 'assistant' } : {}), tool_calls: newNativeCalls },
+                    finish_reason: null,
+                  }],
+                })}\n\n`
+              )
+              sentRole = true
+            } else {
+              // Process tool call interception with shared parser buffering.
+              const outputChunks = this.toolStreamParser?.push(chunk, baseChunk, !sentRole) ?? (
+                chunk ? [{
+                  ...baseChunk,
+                  choices: [{ index: 0, delta: { ...(!sentRole ? { role: 'assistant' } : {}), content: chunk }, finish_reason: null }],
+                }] : []
+              )
+
+              for (const outChunk of outputChunks) {
+                transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
+              }
+
+              if (outputChunks.length > 0) sentRole = true
             }
-
-            if (outputChunks.length > 0) sentRole = true
           } else {
             // Flush any remaining tool call buffer before finishing
             const baseChunk = createBaseChunk(this.conversationId, this.model, this.created)
@@ -863,7 +904,7 @@ export class GLMStreamHandler {
             }
 
             // Determine finish_reason based on whether we had tool calls
-            const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
+            const finishReason = this.toolStreamParser?.hasEmittedToolCall() || emittedNativeToolCallIds.size > 0 ? 'tool_calls' : 'stop'
 
             transStream.write(
               `data: ${JSON.stringify({
@@ -905,7 +946,7 @@ export class GLMStreamHandler {
       for (const outChunk of flushChunks) {
         transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
       }
-      const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
+      const finishReason = this.toolStreamParser?.hasEmittedToolCall() || emittedNativeToolCallIds.size > 0 ? 'tool_calls' : 'stop'
       transStream.write(
         `data: ${JSON.stringify({
           id: this.conversationId,
@@ -929,7 +970,7 @@ export class GLMStreamHandler {
         for (const outChunk of flushChunks) {
           transStream.write(`data: ${JSON.stringify(outChunk)}\n\n`)
         }
-        const finishReason = this.toolStreamParser?.hasEmittedToolCall() ? 'tool_calls' : 'stop'
+        const finishReason = this.toolStreamParser?.hasEmittedToolCall() || emittedNativeToolCallIds.size > 0 ? 'tool_calls' : 'stop'
         transStream.write(
           `data: ${JSON.stringify({
             id: this.conversationId,
@@ -993,6 +1034,7 @@ export class GLMStreamHandler {
               let counter = 1
               let fullText = ''
               let fullReasoning = ''
+              const nativeToolCalls: any[] = []
 
               cachedParts.forEach((part) => {
                 const { content, meta_data } = part
@@ -1029,6 +1071,24 @@ export class GLMStreamHandler {
                     partText += '```python\n' + code + '\n```\n'
                   } else if (type === 'execution_output' && typeof innerContent === 'string' && part.status === 'finish') {
                     partText += innerContent + '\n'
+                  } else if (type === 'tool_calls' && value.tool_calls && typeof value.tool_calls === 'object') {
+                    // GLM web 原生结构化工具调用 part
+                    const tc = value.tool_calls
+                    const tcName = String(tc.name || '')
+                    // 白名单校验：只透传 Chat2API 注入的工具，过滤 GLM web 原生工具
+                    const allowedNames = new Set((this.toolCallingPlan?.tools ?? []).map((t: any) => t.name))
+                    if (allowedNames.size > 0 && !allowedNames.has(tcName)) {
+                      console.log(`[GLM] Filtered native tool call not in allowed list: ${tcName}`)
+                    } else {
+                      nativeToolCalls.push({
+                        id: tc.id || `call_${nativeToolCalls.length}`,
+                        type: 'function',
+                        function: {
+                          name: tcName,
+                          arguments: typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments ?? {}),
+                        },
+                      })
+                    }
                   }
                 })
 
@@ -1040,6 +1100,9 @@ export class GLMStreamHandler {
                 ? { content: fullText, toolCalls: [] }
                 : parseToolCallsFromText(fullText, 'glm')
 
+              // 原生结构化 tool_calls 优先于文本解析结果
+              const effectiveToolCalls = nativeToolCalls.length > 0 ? nativeToolCalls : toolCalls
+
               resolve({
                 id: this.conversationId,
                 model: this.model,
@@ -1049,11 +1112,11 @@ export class GLMStreamHandler {
                     index: 0,
                     message: {
                       role: 'assistant',
-                      content: toolCalls.length > 0 ? null : cleanContent.trim(),
+                      content: effectiveToolCalls.length > 0 ? null : cleanContent.trim(),
                       reasoning_content: fullReasoning || null,
-                      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {})
+                      ...(effectiveToolCalls.length > 0 ? { tool_calls: effectiveToolCalls } : {})
                     },
-                    finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
+                    finish_reason: effectiveToolCalls.length > 0 ? 'tool_calls' : 'stop',
                   },
                 ],
                 usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },

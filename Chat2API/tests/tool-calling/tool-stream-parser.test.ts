@@ -114,3 +114,54 @@ test('generated call IDs stay stable between emitted chunks and final state', ()
   assert.equal(emittedId, 'call_0')
   assert.deepEqual(parser.flush(baseChunk), [])
 })
+
+test('bare Chat2API invoke without tool_calls wrapper emits a tool call instead of leaking XML as text', () => {
+  // GLM-5.2 等模型常省略 <|CHAT2API|tool_calls> 包裹、直接输出裸 invoke。
+  // 流式路径必须将其识别为工具调用；否则 XML 会作为普通文本泄漏，工具从未执行。
+  const parser = new ToolStreamParser(plan('managed_xml'))
+  const text = '<|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="filePath"><![CDATA[/tmp/a]]></|CHAT2API|parameter></|CHAT2API|invoke>'
+  const chunks = parser.push(text, baseChunk)
+
+  assert.equal(parser.hasEmittedToolCall(), true)
+  assert.equal(chunks.some((chunk) => chunk.choices[0].delta.content), false)
+  const toolCall = chunks.at(-1)?.choices[0].delta.tool_calls[0]
+  assert.equal(toolCall?.function.name, 'default_api:read_file')
+  assert.equal(toolCall?.function.arguments, '{"filePath":"/tmp/a"}')
+})
+
+test('bare Chat2API invoke split across streaming chunks emits a tool call', () => {
+  const parser = new ToolStreamParser(plan('managed_xml'))
+  // 分片：起始标记本身被截断（裸 invoke 的 partial 前缀）。
+  assert.deepEqual(parser.push('<|CHAT2API|inv', baseChunk), [])
+  const chunks = parser.push('oke name="default_api:read_file"><|CHAT2API|parameter name="filePath"><![CDATA[/tmp/a]]></|CHAT2API|parameter></|CHAT2API|invoke>', baseChunk)
+
+  assert.equal(parser.hasEmittedToolCall(), true)
+  const toolCall = chunks.at(-1)?.choices[0].delta.tool_calls[0]
+  assert.equal(toolCall?.function.name, 'default_api:read_file')
+  assert.equal(toolCall?.function.arguments, '{"filePath":"/tmp/a"}')
+})
+
+test('bare invoke with self-fabricated tool_result does not leak the hallucinated result', () => {
+  // 模型输出裸 invoke 后常自编 tool_result（模拟执行）。该幻觉块不得透传。
+  const parser = new ToolStreamParser(plan('managed_xml'))
+  const text = '<|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="filePath"><![CDATA[/tmp/a]]></|CHAT2API|parameter></|CHAT2API|invoke>'
+    + '<|CHAT2API|tool_result tool_call_id="call_0"><![CDATA[伪造的内容]]></|CHAT2API|tool_result>'
+  const chunks = parser.push(text, baseChunk)
+
+  assert.equal(parser.hasEmittedToolCall(), true)
+  for (const chunk of chunks) {
+    const delta = chunk.choices[0].delta
+    assert.equal(delta.content, undefined, '幻觉 tool_result 不得作为文本泄漏')
+  }
+})
+
+test('wrapped Chat2API XML is still detected ahead of a bare invoke prefix', () => {
+  // 回归：带 <|CHAT2API|tool_calls> 包裹的调用不能被裸 invoke 起始检测抢先切错。
+  const parser = new ToolStreamParser(plan('managed_xml'))
+  const text = '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="filePath">/tmp/a</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>'
+  const chunks = parser.push(text, baseChunk)
+
+  assert.equal(parser.hasEmittedToolCall(), true)
+  const toolCall = chunks.at(-1)?.choices[0].delta.tool_calls[0]
+  assert.equal(toolCall?.function.name, 'default_api:read_file')
+})
