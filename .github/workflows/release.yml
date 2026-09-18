@@ -13,10 +13,6 @@ jobs:
       contents: write
       actions: write
 
-    defaults:
-      run:
-        working-directory: Chat2API
-
     strategy:
       matrix:
         include:
@@ -40,7 +36,6 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: Chat2API/package-lock.json
 
       - name: Install dependencies
         run: npm ci
