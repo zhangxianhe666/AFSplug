@@ -31,15 +31,15 @@ import {
 const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
 
 test('DeepSeek exposes two primary models and keeps feature aliases in default mappings', () => {
-  assert.deepEqual(DEEPSEEK_PRIMARY_MODELS, ['deepseek-v4-flash', 'deepseek-v4-pro'])
+  assert.deepEqual(DEEPSEEK_PRIMARY_MODELS, ['DeepSeek-V4.1-Flash', 'deepseek-v4-pro'])
   assert.deepEqual(deepseekConfig.supportedModels, DEEPSEEK_PRIMARY_MODELS)
   assert.deepEqual(deepseekConfig.modelMappings, {
-    'deepseek-v4-flash': 'deepseek-v4-flash',
+    'DeepSeek-V4.1-Flash': 'deepseek-v4-flash',
     'deepseek-v4-pro': 'deepseek-v4-pro',
   })
 
   assert.deepEqual(
-    resolveDeepSeekChatOptions({ model: 'deepseek-v4-flash' }),
+    resolveDeepSeekChatOptions({ model: 'DeepSeek-V4.1-Flash' }),
     { modelType: 'default', searchEnabled: false, thinkingEnabled: false },
   )
   assert.deepEqual(
@@ -51,7 +51,7 @@ test('DeepSeek exposes two primary models and keeps feature aliases in default m
     { modelType: 'expert', searchEnabled: true, thinkingEnabled: true },
   )
   assert.deepEqual(
-    resolveDeepSeekChatOptions({ model: 'deepseek-v4-flash-search' }),
+    resolveDeepSeekChatOptions({ model: 'DeepSeek-V4.1-Flash-search' }),
     { modelType: 'default', searchEnabled: true, thinkingEnabled: false },
   )
   assert.deepEqual(
@@ -67,7 +67,7 @@ test('DeepSeek exposes two primary models and keeps feature aliases in default m
     { modelType: 'expert', searchEnabled: true, thinkingEnabled: true },
   )
   assert.deepEqual(
-    resolveDeepSeekChatOptions({ model: 'deepseek-v4-flash' }, 'please use deep thinking if helpful'),
+    resolveDeepSeekChatOptions({ model: 'DeepSeek-V4.1-Flash' }, 'please use deep thinking if helpful'),
     { modelType: 'default', searchEnabled: false, thinkingEnabled: false },
   )
 })
@@ -81,14 +81,16 @@ test('DeepSeek persisted model overrides are migrated away from old built-in ali
         { displayName: 'custom-deepseek-web', actualModelId: 'custom-upstream-model' },
         { displayName: 'my-flash-alias', actualModelId: 'deepseek-v4-flash' },
       ],
-      excludedModels: ['DeepSeek-R1', 'deepseek-v4-flash'],
+      excludedModels: ['DeepSeek-R1', 'deepseek-v4-flash', 'DeepSeek-V4.1-Flash'],
     }),
     {
       addedModels: [
         { displayName: 'custom-deepseek-web', actualModelId: 'custom-upstream-model' },
         { displayName: 'my-flash-alias', actualModelId: 'deepseek-v4-flash' },
       ],
-      excludedModels: ['deepseek-v4-flash'],
+      // legacy 旧名（DeepSeek-R1、deepseek-v4-flash）被清掉，
+      // 仅当前主型号保留
+      excludedModels: ['DeepSeek-V4.1-Flash'],
     },
   )
 
@@ -105,15 +107,15 @@ test('DeepSeek persisted model overrides are migrated away from old built-in ali
 
 test('DeepSeek feature aliases are seeded as global model mappings', () => {
   assert.deepEqual(Object.keys(DEFAULT_DEEPSEEK_MODEL_MAPPINGS), [
-    'deepseek-v4-flash-think',
-    'deepseek-v4-flash-search',
-    'deepseek-v4-flash-think-search',
+    'DeepSeek-V4.1-Flash-think',
+    'DeepSeek-V4.1-Flash-search',
+    'DeepSeek-V4.1-Flash-think-search',
     'deepseek-v4-pro-think',
     'deepseek-v4-pro-search',
     'deepseek-v4-pro-think-search',
   ])
-  assert.deepEqual(DEFAULT_DEEPSEEK_MODEL_MAPPINGS['deepseek-v4-flash-think'], {
-    requestModel: 'deepseek-v4-flash-think',
+  assert.deepEqual(DEFAULT_DEEPSEEK_MODEL_MAPPINGS['DeepSeek-V4.1-Flash-think'], {
+    requestModel: 'DeepSeek-V4.1-Flash-think',
     actualModel: 'deepseek-v4-flash',
     preferredProviderId: 'deepseek',
   })
@@ -129,13 +131,13 @@ test('DeepSeek feature aliases are seeded as global model mappings', () => {
 })
 
 test('built-in model mappings are restored and cannot be replaced by custom config', () => {
-  assert.equal(isDefaultModelMapping('deepseek-v4-flash-search'), true)
+  assert.equal(isDefaultModelMapping('DeepSeek-V4.1-Flash-search'), true)
   assert.equal(isDefaultModelMapping('deepseek-chat'), false)
 
   assert.deepEqual(
     normalizeModelMappingsWithDefaults({
-      'deepseek-v4-flash-search': {
-        requestModel: 'deepseek-v4-flash-search',
+      'DeepSeek-V4.1-Flash-search': {
+        requestModel: 'DeepSeek-V4.1-Flash-search',
         actualModel: 'tampered',
         preferredProviderId: 'custom',
       },
@@ -156,8 +158,8 @@ test('built-in model mappings are restored and cannot be replaced by custom conf
 
 test('DeepSeek default model mapping seeding preserves editable replacement semantics', () => {
   const first = createDefaultModelMappings()
-  first['deepseek-v4-flash-search'].actualModel = 'mutated'
-  assert.equal(createDefaultModelMappings()['deepseek-v4-flash-search'].actualModel, 'deepseek-v4-flash')
+  first['DeepSeek-V4.1-Flash-search'].actualModel = 'mutated'
+  assert.equal(createDefaultModelMappings()['DeepSeek-V4.1-Flash-search'].actualModel, 'deepseek-v4-flash')
 
   const storeSource = readFileSync(
     join(root, 'src/main/store/store.ts'),
@@ -182,7 +184,11 @@ test('GLM, Kimi, and MiniMax built-in default models match current web providers
   assert.equal(glmConfig.modelMappings?.['GLM-5.3'], 'glm-5.3')
   assert.equal(glmConfig.modelMappings?.['GLM-5.3-thinking'], 'glm-5.3-thinking')
 
-  assert.deepEqual(kimiConfig.supportedModels, ['Kimi-K2.6'])
+  // 44f38d6「Kimi K3 工具调用修复」起对外型号改为 Kimi3 / Kimi-K3.1，
+  // Kimi-K2.6 降级为兼容别名（Cherry Studio 等已配置旧名的客户端仍可用）。
+  assert.deepEqual(kimiConfig.supportedModels, ['Kimi3', 'Kimi-K3.1'])
+  assert.equal(kimiConfig.modelMappings?.['Kimi3'], 'kimi-k3')
+  assert.equal(kimiConfig.modelMappings?.['Kimi-K3.1'], 'kimi-k2.6')
   assert.equal(kimiConfig.modelMappings?.['Kimi-K2.6'], 'kimi-k2.6')
   assert.equal(kimiConfig.modelMappings?.['Kimi-K2.5'], undefined)
 
@@ -200,9 +206,11 @@ test('GLM, Kimi, and MiniMax built-in default models match current web providers
   assert.doesNotMatch(minimaxAdapterSource, /MiniMax-M2\.5/)
 })
 
-test('Kimi K2.6 model mapping reaches the web chat request payload', () => {
-  assert.deepEqual(kimiConfig.supportedModels, ['Kimi-K2.6'])
+test('Kimi model mappings reach the web chat request payload', () => {
+  assert.deepEqual(kimiConfig.supportedModels, ['Kimi3', 'Kimi-K3.1'])
+  assert.equal(kimiConfig.modelMappings?.['Kimi-K3.1'], 'kimi-k2.6')
   assert.equal(kimiConfig.modelMappings?.['Kimi-K2.6'], 'kimi-k2.6')
+  assert.equal(resolveKimiScenario('kimi-k3'), 'SCENARIO_K3')
   assert.equal(resolveKimiScenario('kimi-k2.6'), 'SCENARIO_K2D6')
   assert.equal(resolveKimiScenario('kimi-k2.5'), 'SCENARIO_K2D5')
 
@@ -535,11 +543,11 @@ test('DeepSeek locale model labels only describe primary provider models', () =>
   const enData = JSON.parse(en)
 
   assert.deepEqual(zhData.deepseek.models, {
-    'deepseek-v4-flash': 'DeepSeek V4 Flash',
+    'DeepSeek-V4.1-Flash': 'DeepSeek V4.1 Flash',
     'deepseek-v4-pro': 'DeepSeek V4 Pro',
   })
   assert.deepEqual(enData.deepseek.models, {
-    'deepseek-v4-flash': 'DeepSeek V4 Flash',
+    'DeepSeek-V4.1-Flash': 'DeepSeek V4.1 Flash',
     'deepseek-v4-pro': 'DeepSeek V4 Pro',
   })
   assert.equal('DeepSeek-R1' in zhData.deepseek.models, false)

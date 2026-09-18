@@ -153,3 +153,156 @@ test('managed bracket fuzzy-corrects tool name case', () => {
   assert.equal(result.toolCalls.length, 1)
   assert.equal(result.toolCalls[0].function.name, 'default_api:read_file')
 })
+
+// ── 参数归一化：复现 2026-09-10 GLM-5.3 连续三次被客户端挡下的真实故障 ──
+// 会话记录：web_search 的 queries 被写成字符串 "[...]" → "queries" must be an array；
+// 参数标签没被识别时 args 为空 → missing required property "queries"。
+const webSearchTools = [
+  {
+    name: 'web_search',
+    description: 'Search the web',
+    parameters: {
+      type: 'object',
+      properties: { queries: { type: 'array', items: { type: 'string' } } },
+      required: ['queries'],
+    },
+    source: 'openai' as const,
+  },
+  {
+    name: 'read',
+    description: 'Read a file',
+    parameters: {
+      type: 'object',
+      properties: { file_path: { type: 'string' }, offset: { type: 'number' } },
+      required: ['file_path'],
+    },
+    source: 'openai' as const,
+  },
+]
+
+test('managed xml turns a JSON-string array into a real array (queries)', () => {
+  const result = managedXmlProtocol.parse(
+    '<tool_calls><invoke name="web_search"><parameter name="queries">["A股今日行情","深证成指"]</parameter></invoke></tool_calls>',
+    { tools: webSearchTools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 1)
+  assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), {
+    queries: ['A股今日行情', '深证成指'],
+  })
+})
+
+test('managed xml wraps a bare string query into an array', () => {
+  const result = managedXmlProtocol.parse(
+    '<tool_calls><invoke name="web_search"><parameter name="queries">A股今日行情</parameter></invoke></tool_calls>',
+    { tools: webSearchTools, protocol: 'managed_xml' },
+  )
+
+  assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), {
+    queries: ['A股今日行情'],
+  })
+})
+
+test('managed xml backfills the declared array field from a singular alias', () => {
+  const result = managedXmlProtocol.parse(
+    '<tool_calls><invoke name="web_search"><parameter name="query">A股行情</parameter></invoke></tool_calls>',
+    { tools: webSearchTools, protocol: 'managed_xml' },
+  )
+
+  assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), {
+    queries: ['A股行情'],
+  })
+})
+
+test('managed xml coerces declared numbers and drops undeclared arguments', () => {
+  const result = managedXmlProtocol.parse(
+    '<tool_calls><invoke name="read"><parameter name="file_path">/tmp/a</parameter><parameter name="offset">5</parameter><parameter name="bogus">x</parameter></invoke></tool_calls>',
+    { tools: webSearchTools, protocol: 'managed_xml' },
+  )
+
+  assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), {
+    file_path: '/tmp/a',
+    offset: 5,
+  })
+})
+
+test('managed xml leaves arguments untouched when the tool declares no properties', () => {
+  const result = managedXmlProtocol.parse(
+    '<|CHAT2API|tool_calls><|CHAT2API|invoke name="default_api:read_file"><|CHAT2API|parameter name="filePath">/tmp/a</|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>',
+    { tools, protocol: 'managed_xml' },
+  )
+
+  assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), { filePath: '/tmp/a' })
+})
+
+test('managed bracket normalizes arguments too', () => {
+  const result = managedBracketProtocol.parse(
+    '[function_calls][call:web_search]{"queries":"A股行情"}[/call][/function_calls]',
+    { tools: webSearchTools, protocol: 'managed_bracket' },
+  )
+
+  assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), {
+    queries: ['A股行情'],
+  })
+})
+
+// ── schema 驱动的宽容恢复：模型把参数名/工具名直接当标签写 ──
+test('managed xml recovers a call the model wrote with bare parameter tags', () => {
+  // GLM-5.3 实测原文：工具名和参数名都被当成标签，中间还夹着解释性文字。
+  // 修复前严格正则与 tryExtractPartialToolCalls 都认不出，整块被当普通文本泄漏。
+  const result = managedXmlProtocol.parse(
+    '<tool_call>web_search调用失败，我重新查询一下今日A股行情。' +
+      '<tool_call>web_search><queries>["A股今日行情 上证指数 深证成指 创业板指","今日A股市场 收盘 成交量 涨跌家数"]</queries></web_search>',
+    { tools: webSearchTools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 1)
+  assert.equal(result.toolCalls[0].function.name, 'web_search')
+  assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), {
+    queries: ['A股今日行情 上证指数 深证成指 创业板指', '今日A股市场 收盘 成交量 涨跌家数'],
+  })
+  // 恢复成功后原始 XML 必须从 content 剥离，不能再泄漏给客户端
+  assert.doesNotMatch(result.content, /<tool_call>/)
+  assert.doesNotMatch(result.content, /<queries>/)
+})
+
+test('managed xml does not recover when the tool name is ambiguous', () => {
+  // 两个工具都声明了 query，且正文没有显式工具名 → 放弃，避免误判
+  const ambiguous = [
+    {
+      name: 'video_search',
+      description: 'Search videos',
+      parameters: {
+        type: 'object',
+        properties: { query: { type: 'string' } },
+        required: ['query'],
+      },
+      source: 'openai' as const,
+    },
+    {
+      name: 'image_search',
+      description: 'Search images',
+      parameters: {
+        type: 'object',
+        properties: { query: { type: 'string' } },
+        required: ['query'],
+      },
+      source: 'openai' as const,
+    },
+  ]
+  const result = managedXmlProtocol.parse(
+    '<tool_call>我帮你查一下<query>大熊猫</query>',
+    { tools: ambiguous, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 0)
+})
+
+test('managed xml does not recover from prose that merely mentions a parameter name', () => {
+  const result = managedXmlProtocol.parse(
+    '关于 queries 这个参数，我的理解是要传一个数组，但这次我不调用工具。',
+    { tools: webSearchTools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 0)
+})

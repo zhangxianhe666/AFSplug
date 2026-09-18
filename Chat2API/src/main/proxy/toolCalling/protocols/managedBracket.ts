@@ -5,10 +5,12 @@ import {
   createParseResult,
   genericToolResultBlock,
   detectMarkers,
+  normalizeToolArguments,
   renderToolList,
   resolveToolName,
   stripFencedCodeBlocks,
   toolNames,
+  toolSchemaMap,
 } from './shared.ts'
 
 const START_MARKER = '[function_calls]'
@@ -46,11 +48,31 @@ When calling tools, respond with only this block:
   parse(content: string, context: ToolParseContext) {
     const parseable = stripFencedCodeBlocks(content)
     const allowedNames = toolNames(context.tools)
+    const schemaMap = toolSchemaMap(context.tools)
     const rawMatches: string[] = []
     const invalidToolNames: string[] = []
     const toolCalls = []
     const blockPattern = /\[function_calls\]([\s\S]*?)\[\/function_calls\]/g
     let blockMatch: RegExpExecArray | null
+
+    // 按工具 schema 归一化参数（类型纠正 + 必填补齐 + 删未声明字段）
+    const normalizeCalls = (calls: ReturnType<typeof buildToolCall>[]) => {
+      for (const call of calls) {
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(call.function.arguments)
+        } catch {
+          continue
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue
+        const schema = schemaMap.get(call.function.name)
+        if (!schema) continue
+        call.function.arguments = JSON.stringify(
+          normalizeToolArguments(parsed as Record<string, unknown>, schema, call.function.name),
+        )
+      }
+      return calls
+    }
 
     while ((blockMatch = blockPattern.exec(parseable)) !== null) {
       rawMatches.push(blockMatch[0])
@@ -85,7 +107,7 @@ When calling tools, respond with only this block:
     const cleanContent = rawMatches.reduce((acc, raw) => acc.replace(raw, ''), parseable).trim()
     return createParseResult({
       content: cleanContent,
-      toolCalls,
+      toolCalls: normalizeCalls(toolCalls),
       protocol: 'managed_bracket',
       rawMatches,
       invalidToolNames,

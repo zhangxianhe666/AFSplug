@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.4.7-blue?style=flat-square&logo=github" alt="Release">
+  <img src="https://img.shields.io/badge/Release-v1.5.9-blue?style=flat-square&logo=github" alt="Release">
   <img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square" alt="License">
   <br>
   <a href="https://www.electronjs.org/"><img src="https://img.shields.io/badge/Electron-33+-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron"></a>
@@ -36,19 +36,21 @@
 - **多语言**：英文 / 简体中文
 - **现代化 UI**：暗色/亮色主题
 
-## 🆕 本分支新增（v1.4.7）
+## 🆕 本分支新增（v1.5.9）
 
+- **工具调用参数归一化**：新增 `normalizeToolArguments`，将字符串形态的数组参数（如 `web_search.queries`）自动还原为数组，修复 GLM-5.3 等模型因参数类型不符被客户端拦截的故障
+- **Schema 驱动工具提取**：managed XML 协议新增 `tryExtractSchemaDrivenCalls`，参数标签未被识别时按 JSON Schema 兜底抽取，避免 args 为空导致 missing required property
+- **DeepSeek 模型更名**：`deepseek-v4-flash` 对外名改为 `DeepSeek-V4.1-Flash`，旧名登记为 legacy 并迁移历史映射与模型覆盖，避免遗留僵尸配置
 - **Kimi K3 工具调用修复**：provider 切换为 `managed_bracket` 协议，K3 可正常调用工具（原 `managed_xml` 协议 K3 无法识别）
 - **Kimi reasoning_effort 支持**：模型名后缀自动识别（`-adv` → 进阶/high，`-fast` → 快速/low），并支持显式 `reasoning_effort` 参数
 - **工具描述清洗**：将工具描述中的 `Linux environment` 改写为 `local environment`，防止模型误判运行环境（macOS 被当成 Linux 容器）
-- **GLM token 自动刷新增强**：refresh_glm_token.py 重写，更稳定的刷新流程
 - **Windows 兼容**：脚本中心 Python 解释器自动探测（python3 → python → py）
 
 ## 🤖 支持提供商
 
 | Provider         | Auth Type     | OAuth | Models |
 | ---------------- | ------------- | ----- | ------ |
-| DeepSeek         | User Token    | Yes   | deepseek-v4-flash, deepseek-v4-pro |
+| DeepSeek         | User Token    | Yes   | DeepSeek-V4.1-Flash, deepseek-v4-pro |
 | GLM              | Refresh Token | Yes   | GLM-5.3, GLM-5.3-thinking |
 | Kimi             | JWT Token     | Yes   | Kimi3, Kimi-K3.1 |
 | MiniMax          | JWT Token     | Yes   | MiniMax-M2.7 |
@@ -83,8 +85,8 @@ npm run build:all    # 全平台
 打 `v*` 标签触发 GitHub Actions 五平台并行构建：
 
 ```bash
-git tag v1.4.7
-git push origin v1.4.7
+git tag v1.5.9
+git push origin v1.5.9
 ```
 
 > 注意：electron-builder 默认创建 Draft Release，发布后需手动执行

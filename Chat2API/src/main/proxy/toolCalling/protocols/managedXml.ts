@@ -1,16 +1,18 @@
 import type { ToolProtocolAdapter } from './base.ts'
-import type { ToolParseContext } from '../types.ts'
+import type { NormalizedToolDefinition, ToolParseContext } from '../types.ts'
 import {
   addParameter,
   buildToolCall,
   createParseResult,
   detectMarkers,
   escapeXmlAttribute,
+  normalizeToolArguments,
   parseJsonValue,
   renderToolList,
   resolveToolName,
   stripFencedCodeBlocks,
   toolNames,
+  toolSchemaMap,
 } from './shared.ts'
 
 const CHAT2API_START = '<|CHAT2API|tool_calls>'
@@ -40,13 +42,13 @@ The list above is the complete, current set of tools available to you in this tu
 
 ${renderToolList(tools)}
 
-When calling tools, respond with only this Chat2API XML block:
+When calling tools, respond with only this XML tool-call block (generic XML, no special prefixes):
 
-<|CHAT2API|tool_calls><|CHAT2API|invoke name="exact_tool_name"><|CHAT2API|parameter name="argument"><![CDATA[value]]></|CHAT2API|parameter></|CHAT2API|invoke></|CHAT2API|tool_calls>
+<tool_calls><invoke name="exact_tool_name"><parameter name="argument_name">value</parameter></invoke></tool_calls>
 
-Tool results will be provided as Chat2API XML result blocks:
+Write parameter values as plain text. Each <parameter> maps to one declared argument; provide every required argument of the tool.
 
-<|CHAT2API|tool_result tool_call_id="call_id"><![CDATA[result]]></|CHAT2API|tool_result>`
+Tool results will be provided back to you as a tool result block.`
   },
 
   detectStart(buffer) {
@@ -62,9 +64,35 @@ Tool results will be provided as Chat2API XML result blocks:
   parse(content: string, context: ToolParseContext) {
     const parseable = stripFencedCodeBlocks(content)
     const allowedNames = toolNames(context.tools)
+    const schemaMap = toolSchemaMap(context.tools)
     const rawMatches: string[] = []
     const invalidToolNames: string[] = []
     const toolCalls: ReturnType<typeof buildToolCall>[] = []
+
+    /**
+     * 按工具 schema 归一化参数（类型纠正 + 必填补齐 + 删未声明字段）。
+     * 统一在出口处对全部解析路径生效（严格 / 裸 invoke / 宽容恢复）。
+     */
+    const normalizeCalls = (calls: ReturnType<typeof buildToolCall>[]) => {
+      for (const call of calls) {
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(call.function.arguments)
+        } catch {
+          continue
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue
+        const schema = schemaMap.get(call.function.name)
+        if (!schema) continue
+        const normalized = normalizeToolArguments(
+          parsed as Record<string, unknown>,
+          schema,
+          call.function.name,
+        )
+        call.function.arguments = JSON.stringify(normalized)
+      }
+      return calls
+    }
 
     parseBlocks(parseable, {
       blockPattern: /<\|CHAT2API\|tool_calls>([\s\S]*?)<\/\|CHAT2API\|tool_calls>/g,
@@ -121,11 +149,35 @@ Tool results will be provided as Chat2API XML result blocks:
       // 无法被严格正则匹配），则宽容提取：识别 invoke 名称 + 至少一个完整闭合
       // 的 parameter，尽力恢复工具调用，避免整段 XML 作为普通文本泄漏给客户端。
       tryExtractPartialToolCalls(parseable, allowedNames, rawMatches, invalidToolNames, toolCalls)
+
+      // 仍然失败时再按 schema 做一轮宽容恢复：模型有时把参数名/工具名直接当标签
+      // （<queries>、<web_search>），上面两条路径都认不出。
+      const recoveredSpans: string[] = []
+      if (toolCalls.length === 0) {
+        tryExtractSchemaDrivenCalls(
+          parseable,
+          context.tools,
+          allowedNames,
+          invalidToolNames,
+          recoveredSpans,
+          toolCalls,
+        )
+      }
+
+      // 只有真的恢复出调用时才清理 content；否则保持原样，避免误删正文里
+      // 只是「提到」标签的普通文字。
+      const recoveredContent =
+        toolCalls.length > 0
+          ? [...rawMatches, ...recoveredSpans]
+              .reduce((acc, raw) => acc.replace(raw, ''), parseable)
+              .trim()
+          : content
+
       return createParseResult({
-        content,
-        toolCalls,
-        protocol: rawMatches.length > 0 ? 'managed_xml' : 'unknown',
-        rawMatches,
+        content: recoveredContent,
+        toolCalls: normalizeCalls(toolCalls),
+        protocol: rawMatches.length > 0 || toolCalls.length > 0 ? 'managed_xml' : 'unknown',
+        rawMatches: [...rawMatches, ...recoveredSpans],
         invalidToolNames,
       })
     }
@@ -137,7 +189,7 @@ Tool results will be provided as Chat2API XML result blocks:
       .trim()
     return createParseResult({
       content: cleanContent,
-      toolCalls,
+      toolCalls: normalizeCalls(toolCalls),
       protocol: 'managed_xml',
       rawMatches,
       invalidToolNames,
@@ -150,17 +202,25 @@ Tool results will be provided as Chat2API XML result blocks:
       const params = Object.entries(args)
         .map(([name, value]) => {
           const text = typeof value === 'string' ? value : JSON.stringify(value)
-          return `<|CHAT2API|parameter name="${escapeXmlAttribute(name)}"><![CDATA[${text}]]></|CHAT2API|parameter>`
+          return `<parameter name="${escapeXmlAttribute(name)}">${escapeXmlText(text)}</parameter>`
         })
         .join('')
-      return `<|CHAT2API|invoke name="${escapeXmlAttribute(call.name)}">${params}</|CHAT2API|invoke>`
+      return `<invoke name="${escapeXmlAttribute(call.name)}">${params}</invoke>`
     })
-    return `${CHAT2API_START}${invokes.join('')}${CHAT2API_END}`
+    return `<tool_calls>${invokes.join('')}</tool_calls>`
   },
 
   formatToolResult(result) {
-    return `<|CHAT2API|tool_result tool_call_id="${escapeXmlAttribute(result.toolCallId)}"><![CDATA[${result.content}]]></|CHAT2API|tool_result>`
+    return `<tool_result tool_call_id="${escapeXmlAttribute(result.toolCallId)}">${escapeXmlText(result.content)}</tool_result>`
   },
+}
+
+/** 将文本安全地嵌入 XML 元素体（转义 < > &，避免破坏结构）。 */
+function escapeXmlText(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
 }
 
 interface ParseBlockOptions {
@@ -211,6 +271,125 @@ function safeParseObject(value: string): Record<string, unknown> {
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
   } catch {
     return {}
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** 内容里是否出现「像是要调用工具」的标记。用于避免对普通文本做提取。 */
+function looksLikeToolAttempt(content: string): boolean {
+  return /<\/?tool_calls?\b|<invoke\b|<\|\s*CHAT2API\s*\|/i.test(content)
+}
+
+/**
+ * 按 schema 做宽容参数恢复：模型有时**不用 `<parameter name="X">`**，而是把参数名
+ * 甚至工具名直接当标签写。
+ *
+ * 实测 GLM-5.3 的真实输出（整块被当普通文本泄漏给客户端）：
+ * ```
+ * <tool_call>web_search调用失败，我重新查询一下今日A股行情。
+ * <tool_call>web_search><queries>["A股今日行情 上证指数 深证成指 创业板指"]</queries></web_search>
+ * ```
+ * 严格正则和 `tryExtractPartialToolCalls` 都认不出 `<queries>`，于是这次工具调用彻底丢失。
+ *
+ * 这里改为 **schema 驱动**：只认工具 `parameters.properties` 里声明过的参数名，
+ * 因此不会把普通文本误判成工具调用（未声明任何属性的工具直接跳过）。
+ * 工具名优先取显式出现的（`<web_search` 或 `<tool_call>web_search`）；没有显式
+ * 出现时，只有当**恰好一个**工具命中参数标签才恢复，避免歧义误判。
+ *
+ * @param recoveredSpans - 输出：成功恢复时被消费的原始片段（供调用方从 content 中剥离）
+ */
+function tryExtractSchemaDrivenCalls(
+  content: string,
+  tools: NormalizedToolDefinition[],
+  allowedNames: Set<string>,
+  invalidToolNames: string[],
+  recoveredSpans: string[],
+  toolCalls: ReturnType<typeof buildToolCall>[],
+): void {
+  if (toolCalls.length > 0) return
+  if (!looksLikeToolAttempt(content)) return
+
+  const marker = /<\/?tool_calls?\b|<invoke\b|<\|\s*CHAT2API\s*\|/i.exec(content)
+  const start = marker ? marker.index : -1
+
+  interface Candidate {
+    name: string
+    args: Record<string, unknown>
+    explicit: boolean
+    hits: number
+    end: number
+  }
+  const candidates: Candidate[] = []
+
+  for (const tool of tools) {
+    const props = Object.keys(
+      ((tool.parameters?.properties ?? {}) as Record<string, unknown>),
+    )
+    if (props.length === 0) continue
+
+    const args: Record<string, unknown> = {}
+    let hits = 0
+    let end = -1
+
+    for (const prop of props) {
+      const re = new RegExp(
+        `<${escapeRegExp(prop)}\\b[^>]*>([\\s\\S]*?)</${escapeRegExp(prop)}>`,
+        'gi',
+      )
+      let m: RegExpExecArray | null
+      while ((m = re.exec(content)) !== null) {
+        addParameter(args, prop, parseJsonValue(m[1]))
+        hits += 1
+        end = Math.max(end, m.index + m[0].length)
+      }
+    }
+
+    if (hits === 0) continue
+
+    const nameRe = new RegExp(
+      `<${escapeRegExp(tool.name)}\\b|<tool_call[a-z_]*>\\s*${escapeRegExp(tool.name)}\\b`,
+      'i',
+    )
+    candidates.push({ name: tool.name, args, explicit: nameRe.test(content), hits, end })
+  }
+
+  if (candidates.length === 0) return
+
+  const explicit = candidates.filter((c) => c.explicit).sort((a, b) => b.hits - a.hits)
+  const chosen = explicit[0] ?? (candidates.length === 1 ? candidates[0] : undefined)
+  if (!chosen) {
+    console.log(
+      `[managedXml] 宽容提取发现 ${candidates.length} 个候选工具（${candidates
+        .map((c) => c.name)
+        .join(', ')}）但无显式工具名，放弃以免误判`,
+    )
+    return
+  }
+  if (!allowedNames.has(chosen.name)) {
+    invalidToolNames.push(chosen.name)
+    return
+  }
+
+  console.log(
+    `[managedXml] 宽容提取恢复工具调用: ${chosen.name}（${chosen.hits} 个 schema 参数标签）`,
+  )
+  toolCalls.push(
+    buildToolCall(
+      `call_${toolCalls.length}`,
+      toolCalls.length,
+      chosen.name,
+      JSON.stringify(chosen.args),
+    ),
+  )
+
+  if (start >= 0 && chosen.end > start) {
+    // 顺带吞掉紧随其后的闭合标签（如 </web_search>）
+    const tail = /^<\/[A-Za-z_][\w.:-]*>/.exec(content.slice(chosen.end))
+    const end = tail ? chosen.end + tail[0].length : chosen.end
+    recoveredSpans.push(content.slice(start, end))
   }
 }
 

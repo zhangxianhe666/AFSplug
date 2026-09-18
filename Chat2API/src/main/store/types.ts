@@ -602,7 +602,7 @@ export interface ProviderModelOverrides {
  */
 export type UserModelOverrides = Record<string, ProviderModelOverrides>
 
-export const DEEPSEEK_PRIMARY_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro']
+export const DEEPSEEK_PRIMARY_MODELS = ['DeepSeek-V4.1-Flash', 'deepseek-v4-pro']
 
 export const DEEPSEEK_LEGACY_MODEL_MAPPING_NAMES = [
   'deepseek-chat',
@@ -611,6 +611,14 @@ export const DEEPSEEK_LEGACY_MODEL_MAPPING_NAMES = [
   'DeepSeek-Search',
   'DeepSeek-R1',
   'DeepSeek-R1-Search',
+  // V4 Flash 对外名从 deepseek-v4-flash 改为 DeepSeek-V4.1-Flash，
+  // 旧名按本项目既有约定登记为 legacy：用户已持久化的旧别名映射会被
+  // normalizeModelMappingsWithDefaults 清掉，旧模型覆盖会被
+  // sanitizeDeepSeekModelOverrides 迁移掉（否则会留下指向旧名的僵尸配置）。
+  'deepseek-v4-flash',
+  'deepseek-v4-flash-think',
+  'deepseek-v4-flash-search',
+  'deepseek-v4-flash-think-search',
 ]
 
 /**
@@ -712,18 +720,18 @@ export const DEFAULT_REQUEST_LOG_CONFIG: RequestLogConfig = {
 }
 
 export const DEFAULT_DEEPSEEK_MODEL_MAPPINGS: Record<string, ModelMapping> = {
-  'deepseek-v4-flash-think': {
-    requestModel: 'deepseek-v4-flash-think',
+  'DeepSeek-V4.1-Flash-think': {
+    requestModel: 'DeepSeek-V4.1-Flash-think',
     actualModel: 'deepseek-v4-flash',
     preferredProviderId: 'deepseek',
   },
-  'deepseek-v4-flash-search': {
-    requestModel: 'deepseek-v4-flash-search',
+  'DeepSeek-V4.1-Flash-search': {
+    requestModel: 'DeepSeek-V4.1-Flash-search',
     actualModel: 'deepseek-v4-flash',
     preferredProviderId: 'deepseek',
   },
-  'deepseek-v4-flash-think-search': {
-    requestModel: 'deepseek-v4-flash-think-search',
+  'DeepSeek-V4.1-Flash-think-search': {
+    requestModel: 'DeepSeek-V4.1-Flash-think-search',
     actualModel: 'deepseek-v4-flash',
     preferredProviderId: 'deepseek',
   },

@@ -244,7 +244,7 @@
     "userTokenPlaceholder": "请输入 DeepSeek 用户 Token",
     "userTokenHelp": "从 DeepSeek 网页版获取的认证 Token，可在浏览器开发者工具 Application -> Local Storage -> userToken 中找到",
     "models": {
-      "deepseek-v4-flash": "DeepSeek V4 Flash",
+      "DeepSeek-V4.1-Flash": "DeepSeek V4.1 Flash",
       "deepseek-v4-pro": "DeepSeek V4 Pro"
     }
   },

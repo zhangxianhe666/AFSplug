@@ -53,9 +53,13 @@ test('Mimo query preserves managed tool call history for follow-up requests', ()
     },
   ] as any)
 
-  assert.match(query, /<\|CHAT2API\|tool_calls>/)
-  assert.match(query, /<\|CHAT2API\|invoke name="weather-test:get_weather">/)
-  assert.match(query, /<\|CHAT2API\|tool_result tool_call_id="call_1">/)
+  // v1.5.8 起工具历史改用中性 XML 方言：不再出现 `<|CHAT2API|...>` 与 CDATA
+  // （两者是上游风控的敏感特征签名）。解析侧仍兼容旧格式，但不再主动生成。
+  assert.match(query, /<tool_calls><invoke name="weather-test:get_weather">/)
+  assert.match(query, /<parameter name="city">Hangzhou<\/parameter>/)
+  assert.match(query, /<tool_result tool_call_id="call_1">/)
+  assert.doesNotMatch(query, /CHAT2API/)
+  assert.doesNotMatch(query, /<!\[CDATA\[/)
   assert.match(query, /Hangzhou/)
   assert.match(query, /User: 根据工具结果回答/)
 })

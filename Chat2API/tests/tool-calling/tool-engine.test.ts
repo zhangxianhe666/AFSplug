@@ -56,7 +56,11 @@ test('OpenAI tools plus DeepSeek choose managed prompt', () => {
   assert.equal(result.plan.shouldInjectPrompt, true)
   assert.equal(result.tools, undefined)
   assert.equal(result.plan.tools.length, 2)
-  assert.match(result.messages[0].content as string, /<\|CHAT2API\|tool_calls>/)
+  // 注入的提示词教的是中性格式 `<tool_calls><invoke ...>`，不再出现
+  // `<|CHAT2API|...>` —— 后者是服务端风控的敏感特征签名（解析侧仍然兼容它，
+  // 见 tool-parser.test.ts 的 Chat2API 用例，但绝不在提示词里教）。
+  assert.match(result.messages[0].content as string, /<tool_calls><invoke name="exact_tool_name">/)
+  assert.doesNotMatch(result.messages[0].content as string, /CHAT2API/)
 })
 
 test('explicit Cherry Studio MCP adapter uses managed prompt and preserves tool names', () => {

@@ -49,7 +49,7 @@
 
 | 服务商           | 认证类型          | OAuth | 模型                                                                                                                                                                                                                                            |
 | ------------- | ------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| DeepSeek      | User Token    | 是     | deepseek-v4-flash, deepseek-v4-pro                                                                                                                                                                                                            |
+| DeepSeek      | User Token    | 是     | DeepSeek-V4.1-Flash, deepseek-v4-pro                                                                                                                                                                                                            |
 | GLM           | Refresh Token | 是     | GLM-5.3, GLM-5.3-thinking                                                                                                                                                                                                                                       |
 | Kimi          | JWT Token     | 是     | Kimi3, Kimi-K3.1                                                                                                                                                                                                                                     |
 | MiniMax       | JWT Token     | 是     | MiniMax-M2.7                                                                                                                                                                                                                                  |
@@ -148,7 +148,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="deepseek-v4-flash",
+    model="DeepSeek-V4.1-Flash",
     messages=[
         {"role": "user", "content": "你好，你是谁？"}
     ]

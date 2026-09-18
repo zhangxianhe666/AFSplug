@@ -209,6 +209,162 @@ export function addParameter(target: Record<string, unknown>, name: string, valu
   }
 }
 
+/** 工具名 → 参数 JSON Schema 的索引，供参数归一化查询。 */
+export function toolSchemaMap(
+  tools: NormalizedToolDefinition[],
+): Map<string, Record<string, unknown>> {
+  const map = new Map<string, Record<string, unknown>>()
+  for (const tool of tools) {
+    if (tool?.name) map.set(tool.name, (tool.parameters ?? {}) as Record<string, unknown>)
+  }
+  return map
+}
+
+/** 数组类参数在模型输出里常用的单数/同义写法，用于回填数组字段。 */
+const ARRAY_ALIASES = ['query', 'queries', 'q', 'search', 'keyword', 'keywords', 'urls', 'url']
+
+function coerceToArray(value: unknown): unknown[] | null {
+  if (Array.isArray(value)) return value.length > 0 ? value : null
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  // 模型常把数组写成 JSON 字符串（`["a","b"]`），先尝试还原
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed
+    } catch {
+      // 无法还原则退化为单元素数组
+    }
+  }
+  return [trimmed]
+}
+
+function defaultForType(type: unknown): unknown {
+  switch (type) {
+    case 'array':
+      return []
+    case 'boolean':
+      return false
+    case 'number':
+    case 'integer':
+      return 0
+    default:
+      return ''
+  }
+}
+
+/**
+ * 按工具的 JSON Schema 归一化模型解析出的参数。
+ *
+ * 为什么需要：协议层原先只做「能 JSON.parse 就 parse，否则当字符串」，不查 schema。
+ * 实测 GLM-5.3 因此连续三次调用被客户端挡下：
+ *   - 参数标签没被识别 → `args={}` → `missing required property "queries"`
+ *   - 数组被写成字符串 `"[...]"` → `"queries" must be an array`
+ * 归一化后自动做类型纠正与必填补齐，避免整轮工具调用白白浪费。
+ *
+ * 规则：
+ * 1. 数组字段：字符串（含 JSON 字符串）→ 数组；空值尝试从同义单数字段回填
+ * 2. 字符串字段：单元素数组 → 该元素
+ * 3. 数字/布尔字段：可解析的字符串 → 对应类型
+ * 4. 必填缺失 → 按类型补合理默认值
+ * 5. 删除 schema 未声明的参数（仅当 schema 明确列出 properties 时）
+ *
+ * @param args - 已解析的参数对象
+ * @param schema - 该工具的 parameters JSON Schema
+ * @param toolName - 工具名（仅用于日志）
+ * @returns 归一化后的新对象；无 schema 时原样返回
+ */
+export function normalizeToolArguments(
+  args: Record<string, unknown>,
+  schema: Record<string, unknown> | undefined,
+  toolName: string,
+): Record<string, unknown> {
+  if (!schema || typeof schema !== 'object') return args
+  const props = (schema.properties ?? {}) as Record<string, Record<string, unknown>>
+  const required = Array.isArray(schema.required) ? (schema.required as string[]) : []
+  if (Object.keys(props).length === 0 && required.length === 0) return args
+
+  const out: Record<string, unknown> = { ...args }
+
+  // 1) 类型纠正
+  for (const [prop, spec] of Object.entries(props)) {
+    if (!spec || typeof spec !== 'object') continue
+    const type = spec.type
+    const value = out[prop]
+
+    if (type === 'array') {
+      const coerced = coerceToArray(value)
+      if (coerced) {
+        if (!Array.isArray(value)) {
+          console.log(`[toolArgs] ${toolName}.${prop}: 非数组 → 已纠正为数组`)
+        }
+        out[prop] = coerced
+        continue
+      }
+      // 值为空：尝试从同义单数字段回填（如 queries ← query）
+      let filled: unknown[] | null = null
+      for (const alias of ARRAY_ALIASES) {
+        if (alias === prop || out[alias] === undefined) continue
+        filled = coerceToArray(out[alias])
+        if (filled) break
+      }
+      if (filled) {
+        out[prop] = filled
+        console.log(`[toolArgs] ${toolName}.${prop}: 缺失/空 → 已从同义字段回填`)
+      } else if (value !== undefined) {
+        out[prop] = []
+      }
+      continue
+    }
+
+    if (value === undefined) continue
+
+    if (type === 'string' && Array.isArray(value) && value.length === 1) {
+      out[prop] = typeof value[0] === 'string' ? value[0] : String(value[0])
+      console.log(`[toolArgs] ${toolName}.${prop}: 单元素数组 → 已解包为字符串`)
+    } else if ((type === 'number' || type === 'integer') && typeof value === 'string') {
+      const num = Number(value.trim())
+      if (value.trim() !== '' && Number.isFinite(num)) {
+        out[prop] = type === 'integer' ? Math.trunc(num) : num
+        console.log(`[toolArgs] ${toolName}.${prop}: 字符串 → 已转为数字`)
+      }
+    } else if (type === 'boolean' && typeof value === 'string') {
+      const lowered = value.trim().toLowerCase()
+      if (lowered === 'true' || lowered === 'false') {
+        out[prop] = lowered === 'true'
+        console.log(`[toolArgs] ${toolName}.${prop}: 字符串 → 已转为布尔`)
+      }
+    }
+  }
+
+  // 2) 必填补齐
+  for (const prop of required) {
+    const value = out[prop]
+    const missing =
+      value === undefined ||
+      value === null ||
+      value === '' ||
+      (Array.isArray(value) && value.length === 0)
+    if (!missing) continue
+    const spec = props[prop] ?? {}
+    out[prop] = defaultForType(spec.type)
+    console.log(`[toolArgs] ${toolName}: 缺少必填 '${prop}' → 已按类型补默认值`)
+  }
+
+  // 3) 删除 schema 未声明的参数（模型常额外编造同义字段）
+  if (Object.keys(props).length > 0) {
+    for (const key of Object.keys(out)) {
+      if (!(key in props)) {
+        delete out[key]
+        console.log(`[toolArgs] ${toolName}: 删除未声明参数 '${key}'`)
+      }
+    }
+  }
+
+  return out
+}
+
 export function renderToolList(tools: NormalizedToolDefinition[]): string {
   return tools
     .map((tool) => {

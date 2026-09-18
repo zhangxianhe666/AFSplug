@@ -59,9 +59,37 @@ test('auto mode manages P0 provider requests with tools', () => {
   })
 
   assert.equal(plan.mode, 'managed')
-  assert.equal(plan.protocol, 'managed_xml')
+  // Kimi 在 44f38d6「Kimi K3 工具调用修复」中被单独切到方括号方言
+  // （getProviderToolProfile('kimi').preferredManagedProtocol === 'managed_bracket'），
+  // 这里断言的是 plan 如实透传 profile 的选择，而不是某个固定协议。
+  assert.equal(plan.protocol, 'managed_bracket')
   assert.equal(plan.clientAdapterId, 'cherry-studio-mcp')
   assert.deepEqual([...plan.allowedToolNames], ['weather-test:get_weather'])
+})
+
+test('XML providers get managed_xml on the same auto path', () => {
+  const plan = buildToolCallingRuntimePlan({
+    requestId: 'r2b',
+    providerId: 'deepseek',
+    actualModel: 'deepseek-chat',
+    config: {
+      enabled: true,
+      mode: 'auto',
+      clientAdapterId: 'cherry-studio-mcp',
+      diagnosticsEnabled: false,
+      advanced: { promptPreviewEnabled: false },
+    },
+    clientRequest: {
+      clientAdapterId: 'cherry-studio-mcp',
+      toolSource: 'mcp',
+      tools,
+      toolChoice: { mode: 'auto' },
+      diagnostics: { rawToolCount: 1, normalizedToolNames: ['weather-test:get_weather'] },
+    },
+  })
+
+  assert.equal(plan.mode, 'managed')
+  assert.equal(plan.protocol, 'managed_xml')
 })
 
 test('tool_choice none disables prompt injection and parsing', () => {

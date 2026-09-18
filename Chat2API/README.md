@@ -49,7 +49,7 @@
 
 | Provider         | Auth Type     | OAuth | Models                                                                                                                                                                                                                                          |
 | ---------------- | ------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| DeepSeek         | User Token    | Yes   | deepseek-v4-flash, deepseek-v4-pro                                                                                                                                                                                                              |
+| DeepSeek         | User Token    | Yes   | DeepSeek-V4.1-Flash, deepseek-v4-pro                                                                                                                                                                                                              |
 | GLM              | Refresh Token | Yes   | GLM-5.3, GLM-5.3-thinking                                                                                                                                                                                                                                         |
 | Kimi             | JWT Token     | Yes   | Kimi3, Kimi-K3.1                                                                                                                                                                                                                                       |
 | MiniMax          | JWT Token     | Yes   | MiniMax-M2.7                                                                                                                                                                                                                                    |
@@ -148,7 +148,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="deepseek-v4-flash",
+    model="DeepSeek-V4.1-Flash",
     messages=[
         {"role": "user", "content": "Hello, who are you?"}
     ]
