@@ -5,3 +5,6 @@ dist/
 *.log
 .env
 .env.local
+
+# 本地助手记忆/工程数据，不入公开仓库
+.workbuddy/
