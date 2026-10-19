@@ -5,14 +5,16 @@ export interface DeepSeekChatOptionInput {
 }
 
 export interface DeepSeekChatOptions {
-  modelType: 'default' | 'expert'
+  /** `vision` 是带图请求的专用取值：不带它下游会退回纯文本语义（模型看不到图）。 */
+  modelType: 'default' | 'expert' | 'vision'
   searchEnabled: boolean
   thinkingEnabled: boolean
 }
 
 export function resolveDeepSeekChatOptions(
   request: DeepSeekChatOptionInput,
-  _prompt: string = ''
+  _prompt: string = '',
+  hasImages: boolean = false
 ): DeepSeekChatOptions {
   const modelLower = request.model.toLowerCase()
   const isProModel = modelLower.includes('deepseek-v4-pro') || modelLower.includes('expert')
@@ -22,7 +24,10 @@ export function resolveDeepSeekChatOptions(
     || modelLower.includes('reasoner')
 
   return {
-    modelType: isProModel ? 'expert' : 'default',
+    // 带图时必须是 vision：实测文档写明"vision 请求上传图片时必须带上 vision，
+    // 否则下游容易退回到仅文本或 OCR 语义"——表现为模型对着图片返回空内容，
+    // 且上游既不报错也不解释。
+    modelType: hasImages ? 'vision' : (isProModel ? 'expert' : 'default'),
     searchEnabled: Boolean(request.web_search) || isSearchAlias,
     thinkingEnabled: Boolean(request.reasoning_effort)
       || isThinkingAlias,

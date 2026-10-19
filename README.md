@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.6.0-blue?style=flat-square&logo=github" alt="Release">
+  <img src="https://img.shields.io/badge/Release-v1.7.0-blue?style=flat-square&logo=github" alt="Release">
   <img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square" alt="License">
   <br>
   <a href="https://www.electronjs.org/"><img src="https://img.shields.io/badge/Electron-33+-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron"></a>
@@ -36,14 +36,18 @@
 - **多语言**：英文 / 简体中文
 - **现代化 UI**：暗色/亮色主题
 
-## 🆕 本分支新增（v1.6.0）
+## 🆕 本分支新增（v1.7.0）
 
-- **仓库结构扁平化**：移除 `Chat2API/` 中间层，应用代码与配置直接位于仓库根目录；Git 历史经 rename 完整保留，代码、结构与功能不变
-- **应用更名为 AFS**：macOS 菜单栏/Dock、Windows 快捷方式与开始菜单、Linux 桌面项，以及窗口标题、托盘菜单、关于页统一显示 **AFS**
-- **数据零丢失**：保留 `~/.chat2api/` 数据目录、钥匙串条目（`chat2api Safe Storage`）、localStorage 键与自动更新标识不变，老用户账号与设置无需迁移
+- **本地图片真正进入请求**：`@文件` 引用图片时，适配器会把本地图片读成字节并按各 provider 的原生通道送出 —— DeepSeek 走 `/v0/file/upload_file`（PoW 挑战按上传接口单独申请）后以 `ref_file_ids` 引用，GLM 复用其 `image_url` 附件通道；模型不再只看到一个文件名
+- **两条路由都覆盖**：经过 `ds-trim-gateway` 时消费网关注入的 `[[local-image:/abs/path]]` 标记；DSH 直连上游时用 `session workspace` + 引用标签自行还原绝对路径，不依赖网关
+- **失败即降级**：上传/读盘失败一律退回纯文本，绝不阻断对话；本地路径从 prompt 中剥离，不会泄露到上游
+- **DeepSeek 错误不再静默**：上游用 `HTTP 200 + JSON 错误体` 报错（如 `40301 INVALID_POW_RESPONSE`）时，现在会记录日志并让请求真正失败，而不是表现为"空响应"
+- **图片引用被拒自动恢复**：识别 `biz_code 9 / invalid ref file id` 后清空被污染的会话缓存，下一轮自动换新会话，无需重启
 
 ### 历史版本要点
 
+- **仓库结构扁平化**（v1.6.0）：移除 `Chat2API/` 中间层，应用代码与配置直接位于仓库根目录；Git 历史经 rename 完整保留
+- **应用更名为 AFS**（v1.6.0）：菜单栏/Dock、快捷方式、桌面项、窗口标题、托盘与关于页统一显示 **AFS**，同时保留 `~/.chat2api/` 数据目录、钥匙串条目与 localStorage 键，老用户零迁移
 - **工具调用参数归一化**（v1.5.9）：新增 `normalizeToolArguments`，将字符串形态的数组参数（如 `web_search.queries`）自动还原为数组，修复 GLM-5.3 等模型因参数类型不符被客户端拦截的故障
 - **Schema 驱动工具提取**（v1.5.9）：managed XML 协议新增 `tryExtractSchemaDrivenCalls`，参数标签未被识别时按 JSON Schema 兜底抽取
 - **DeepSeek 模型更名**（v1.5.9）：`deepseek-v4-flash` 对外名改为 `DeepSeek-V4.1-Flash`，旧名登记为 legacy 并迁移历史映射
@@ -89,8 +93,8 @@ npm run build:all    # 全平台
 打 `v*` 标签触发 GitHub Actions 五平台并行构建：
 
 ```bash
-git tag v1.6.0
-git push origin v1.6.0
+git tag v1.7.0
+git push origin v1.7.0
 ```
 
 > 注意：electron-builder 默认创建 Draft Release，发布后需手动执行

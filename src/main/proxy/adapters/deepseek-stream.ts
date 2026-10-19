@@ -7,9 +7,41 @@ import { PassThrough } from 'stream'
 import { parseToolCallsFromText } from '../utils/toolParser.ts'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser.ts'
 import type { ToolCallingPlan } from '../toolCalling/types.ts'
+import { describeDeepSeekErrorLine } from './deepseekError.ts'
 
 const MODEL_NAME = 'deepseek-chat'
 const SEARCH_CONTROL_MARKER_PATTERN = /^(SEARCH|WEB_SEARCH|SEARCHING)(?:\s+|$)/i
+
+/**
+ * 引用被拒（`biz_code 9 / invalid ref file id`）会**污染整个会话**：
+ * 服务端之后对这个会话的每一轮都返回同一错误。清掉会话缓存换一个新的。
+ */
+const INVALID_REF_FILE_ID = /^code=9(\s|$)/
+
+/**
+ * 记录一次上游错误体，并在确认是"引用被拒"时换掉被污染的会话。
+ *
+ * 这里刻意用**动态 import** 而不是顶层 import：本模块会被 `node --test` 直接加载
+ * 做单测，一旦顶层引入 store / deepseek，解析链里会拖进 `electron`，
+ * 整个测试文件在 Node 下直接 `ERR_MODULE_NOT_FOUND`。错误体只在真出错时才走到，
+ * 动态加载的开销可以忽略；加载失败也只降级成 console，不影响对话本身。
+ */
+function reportUpstreamErrorBody(detail: string): void {
+  console.error('[DeepSeek] 上游返回非 SSE 错误体:', detail)
+  const sessionPoisoned = INVALID_REF_FILE_ID.test(detail)
+  void (async () => {
+    try {
+      const { storeManager } = await import('../../store/store')
+      storeManager.addLog('error', `[DeepSeek] 上游错误体: ${detail}`)
+      if (!sessionPoisoned) return
+      const { clearDeepSeekSessionCache } = await import('./deepseek')
+      clearDeepSeekSessionCache()
+      storeManager.addLog('warn', '[DeepSeek] 图片引用被拒 → 已清空会话缓存，下一轮改用它新建的会话')
+    } catch (error) {
+      console.error('[DeepSeek] 记录上游错误体失败:', error)
+    }
+  })()
+}
 
 function stripSearchControlMarker(content: string, enabled: boolean): string {
   return enabled ? content.replace(SEARCH_CONTROL_MARKER_PATTERN, '') : content
@@ -203,7 +235,16 @@ export class DeepSeekStreamHandler {
       buffer = lines.pop() || ''
 
       for (const line of lines) {
-        if (!line.trim() || !line.startsWith('data:')) continue
+        if (!line.trim()) continue
+        if (!line.startsWith('data:')) {
+          // 非 SSE 行：正常情况下不该出现。DeepSeek 的错误体走这里，
+          // 必须记下来，否则一次失败就是无声的"空响应"。
+          const detail = describeDeepSeekErrorLine(line)
+          if (detail) {
+            reportUpstreamErrorBody(detail)
+          }
+          continue
+        }
 
         const data = line.slice(5).trim()
         if (data === '[DONE]') {
@@ -464,14 +505,29 @@ export class DeepSeekStreamHandler {
 
     return new Promise((resolve, reject) => {
       let buffer = ''
+      let failed = false
 
       stream.on('data', (chunk: Buffer) => {
+        if (failed) return
         buffer += chunk.toString()
         const lines = buffer.split('\n')
         buffer = lines.pop() || ''
 
         for (const line of lines) {
-          if (!line.trim() || !line.startsWith('data:')) continue
+          if (!line.trim()) continue
+          if (!line.startsWith('data:')) {
+            // DeepSeek 的错误体是 HTTP 200 + JSON（如 {"code":40301,"msg":"…"}），
+            // 不带 data: 前缀。这里以前是一行 continue 把它吞掉，一次失败请求最终
+            // 只表现为"空响应"——既不报错也无日志。现在把它变成真正的失败。
+            const detail = describeDeepSeekErrorLine(line)
+            if (detail) {
+              failed = true
+              reportUpstreamErrorBody(detail)
+              reject(new Error(`DeepSeek upstream error: ${detail}`))
+              return
+            }
+            continue
+          }
 
           const data = line.slice(5).trim()
           if (data === '[DONE]') return
@@ -588,6 +644,7 @@ export class DeepSeekStreamHandler {
       })
 
       stream.on('end', () => {
+        if (failed) return   // 已按上游错误体失败，不再产出空内容
         // Parse tool calls from accumulated content
         const { content: cleanContent, toolCalls } = this.toolCallingPlan?.shouldParseResponse
           ? { content: accumulatedContent, toolCalls: [] }

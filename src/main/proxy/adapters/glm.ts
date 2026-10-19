@@ -20,6 +20,18 @@ import {
 import { getProviderToolProfile } from '../toolCalling/providerProfiles'
 import { ToolStreamParser } from '../toolCalling/ToolStreamParser'
 import type { ToolCallingPlan } from '../toolCalling/types'
+import fs from 'node:fs'
+import {
+  LOCAL_IMAGE_MARKER_PREFIX,
+  LOCAL_IMAGE_MAX_BYTES,
+  buildDataUri,
+  imageMimeOf,
+  resolveLocalImageUris,
+} from './localImage'
+import {
+  collectWorkspaceImagePaths,
+  containsWorkspaceReference,
+} from './workspaceReference'
 
 const GLM_API_BASE = 'https://chatglm.cn/chatglm'
 const DEFAULT_ASSISTANT_ID = '65940acff94777010aa6b796'
@@ -202,6 +214,9 @@ export class GLMAdapter {
    * Upload file to GLM
    */
   private async uploadFile(fileUrl: string): Promise<{ source_id: string; file_url?: string }> {
+    // data URI 可能有几 MB，日志里只留类型；真实 URL 则截断显示
+    const isDataUri = this.isBase64Data(fileUrl)
+    storeManager.addLog('info', `[GLM] 开始上传: ${isDataUri ? `(data URI, ${fileUrl.length}B)` : fileUrl.slice(0, 160)}`)
     console.log('[GLM] Uploading file:', fileUrl.substring(0, 50) + '...')
     
     let filename: string
@@ -248,11 +263,103 @@ export class GLMAdapter {
     )
 
     if (response.status !== 200 || !response.data?.result) {
-      throw new Error(`File upload failed: HTTP ${response.status}`)
+      // 记下响应体：GLM 的失败也常是 HTTP 200 + 业务错误码，不落盘就无从排查
+      const detail = `HTTP ${response.status} ${JSON.stringify(response.data).slice(0, 400)}`
+      storeManager.addLog('error', `[GLM] 上传失败: ${detail}`)
+      throw new Error(`File upload failed: ${detail}`)
     }
 
     console.log('[GLM] File uploaded successfully:', response.data.result.source_id)
+    // 完整响应原文：网页端引用图片时到底用哪个字段（source_id / id / file_id / file_url）
+    // 直接决定 messages 里 image_url 部件怎么写，必须留下证据
+    storeManager.addLog('info',
+      `[GLM] 上传响应原文: ${JSON.stringify(response.data).slice(0, 800)}`)
+    storeManager.addLog('info',
+      `[GLM] 上传成功: source_id=${response.data.result.source_id} file_url=${response.data.result.file_url || '(空)'}`)
     return response.data.result
+  }
+
+  /**
+   * 消费网关注入的 `[[local-image:/abs/path]]` 标记：读盘成 data URI，并把标记
+   * 从正文里剥掉（标记里是本地绝对路径，绝不能进 prompt）。
+   *
+   * 这条路径只在请求**经过 ds-trim-gateway**（8001）时出现；DSH 直连上游的路由
+   * 没有标记，由 {@link collectWorkspaceImageUris} 兜底。
+   * @param messages - 待发送的消息；函数会就地把含标记的文本换成剥离后的正文。
+   * @returns 可上传的 data URI 列表。
+   */
+  private extractMarkerImageUris(messages: GLMMessage[]): string[] {
+    const collected: string[] = []
+    for (let i = 0; i < messages.length; i += 1) {
+      const msg = messages[i]
+      if (msg.role !== 'user' || typeof msg.content !== 'string') continue
+      if (!msg.content.includes(LOCAL_IMAGE_MARKER_PREFIX)) continue
+
+      const { cleaned, uris, found } = resolveLocalImageUris(
+        msg.content, absPath => this.readLocalImageAsDataUri(absPath))
+
+      // 标记整行剥掉；正文里不留任何本地绝对路径
+      messages[i] = { ...msg, content: cleaned }
+      collected.push(...uris)
+      storeManager.addLog('info',
+        `[GLM] 网关图片标记 ${found} 张，读入成功 ${uris.length} 张`)
+    }
+    return collected
+  }
+
+  /**
+   * DSH「直连上游」的路由不经过网关，也就没有标记可消费 —— 于是自己解析
+   * `<workspace-reference path="…">`：相对路径按运行时上下文里的 `session workspace`
+   * 补全成绝对路径，再读盘成 data URI。
+   *
+   * 标签本身**保留在正文里**（让模型仍知道文件名）。任何一张图失败都只跳过它。
+   * @param messages - 待发送的消息。
+   * @returns 可上传的 data URI 列表。
+   */
+  private collectWorkspaceImageUris(messages: GLMMessage[]): string[] {
+    const texts = messages
+      .map(msg => (typeof msg.content === 'string' ? msg.content : ''))
+      .filter(text => text.length > 0)
+    const { paths, root } = collectWorkspaceImagePaths(texts)
+
+    if (paths.length === 0) {
+      if (texts.some(containsWorkspaceReference)) {
+        storeManager.addLog('warn',
+          '[GLM] 见到 <workspace-reference> 但没解析出图片路径'
+          + `（session workspace=${root || '(未找到)'}）`)
+      }
+      return []
+    }
+
+    const uris = paths
+      .map(absPath => this.readLocalImageAsDataUri(absPath))
+      .filter(uri => uri.length > 0)
+    storeManager.addLog('info',
+      `[GLM] 自解析 workspace 引用 ${paths.length} 张，读入成功 ${uris.length} 张`
+      + `（workspace=${root || '(无)'}）`)
+    return uris
+  }
+
+  /** 读本地图片并包成 data URI；失败只记日志并返回空串。 */
+  private readLocalImageAsDataUri(absPath: string): string {
+    try {
+      const stat = fs.statSync(absPath)
+      if (!stat.isFile()) {
+        storeManager.addLog('warn', `[GLM] 不是文件，跳过本地图片: ${absPath}`)
+        return ''
+      }
+      if (stat.size <= 0 || stat.size > LOCAL_IMAGE_MAX_BYTES) {
+        storeManager.addLog('warn',
+          `[GLM] 本地图片 ${stat.size}B 超出上限 ${LOCAL_IMAGE_MAX_BYTES}，跳过: ${absPath}`)
+        return ''
+      }
+      const mime = imageMimeOf(absPath)
+      return buildDataUri(mime || 'application/octet-stream', fs.readFileSync(absPath))
+    } catch (error) {
+      storeManager.addLog('warn',
+        `[GLM] 读取本地图片失败，跳过: ${absPath} ${(error as Error).message}`)
+      return ''
+    }
   }
 
   /**
@@ -280,8 +387,14 @@ export class GLMAdapter {
   private messagesToPrompt(messages: GLMMessage[], refs: any[] = [], toolsPrompt?: string, isMultiTurn: boolean = false): { role: string; content: any[] }[] {
     const toolProfile = getProviderToolProfile('glm')
     // Separate image refs and file refs
-    const imageRefs = refs.filter((ref) => ref.width !== undefined || ref.height !== undefined || ref.image_url)
-    const fileRefs = refs.filter((ref) => !ref.width && !ref.height && !ref.image_url)
+    //
+    // 判据只看我们自己加的 image_url。**不能拿 width/height 当哨兵** —— 上传结果
+    // 本身就带真实 width/height（如 64×64），用同名字段作标记会把真实值覆盖掉，
+    // 出口再剔除就等于把尺寸白丢了。
+    const isImageRef = (ref: any) =>
+      typeof ref.image_url === 'string' && ref.image_url.length > 0
+    const imageRefs = refs.filter(isImageRef)
+    const fileRefs = refs.filter((ref) => !isImageRef(ref))
 
     // Build content array
     const content: any[] = []
@@ -298,12 +411,19 @@ export class GLMAdapter {
     }
 
     // Add image references
-    for (const imageRef of imageRefs) {
+    //
+    // 注意这是 **chatglm 的原生格式**，不是 OpenAI 那套：
+    //   chatglm：  { type: 'image', image: [ <上传结果对象> … ] }
+    //   OpenAI ：  { type: 'image_url', image_url: { url } }
+    // 实测发成 image_url 时模型完全收不到图（回 "请提供图片链接" / "No image provided"），
+    // 而上游不报任何错误——最难查的一类问题。参考实现（rev-chatglm）用的是默认助手
+    // `65940acff94777010aa6b796`（与本文件相同）配 `type:'image'` 部件，识图可用。
+    // 另外所有图片放在**同一个**部件里，与参考实现一致。
+    if (imageRefs.length > 0) {
       content.push({
-        type: 'image_url',
-        image_url: {
-          url: imageRef.image_url || imageRef.source_id,
-        },
+        type: 'image',
+        // 原样带上整份上传结果（含真实的 file_id / file_url / width / height）
+        image: imageRefs,
       })
     }
 
@@ -454,6 +574,16 @@ GLM STRICT RULES:
       }
     }
 
+    // 本地图片（路线 A）有两条来源：
+    //  ① 网关注入的 [[local-image:…]] 标记 —— 请求经过 ds-trim-gateway 时才有
+    //  ② DSH 直连上游时的 <workspace-reference>，AFS 自己解析（见 workspaceReference.ts）
+    // 有标记就不再解析引用：两者指向同一批文件，避免重复上传。
+    const markerImageUris = this.extractMarkerImageUris(messages)
+    const referenceImageUris = markerImageUris.length > 0
+      ? []
+      : this.collectWorkspaceImageUris(messages)
+    const localImageUris = [...markerImageUris, ...referenceImageUris]
+
     // Extract and upload files
     const { fileUrls, imageUrls } = this.extractFileUrls(messages)
     const refs: any[] = []
@@ -471,22 +601,40 @@ GLM STRICT RULES:
       }
     }
 
-    // Upload images
-    for (const imageUrl of imageUrls) {
+    // Upload images（原生附件 + 本地图片，统一走这一条上传通道）
+    for (const imageUrl of [...imageUrls, ...localImageUris]) {
       try {
         const result = await this.uploadFile(imageUrl)
+        if (!result.file_url) {
+          // 没有 file_url 时会退回把原始数据（可能是几 MB 的 data URI）当引用，
+          // 模型大概率读不懂，单独记一条便于定位
+          storeManager.addLog('warn',
+            `[GLM] 上传未返回 file_url，将回退原始数据: source_id=${result.source_id}`)
+        }
         refs.push({
-          source_id: result.source_id,
+          // 保留上传响应的全部字段：chatglm 的图片部件要的是**整份上传结果**，
+          // 新版接口已经不返回 source_id（实测为 undefined），按字段挑会挑空。
+          // 这里**不加 width/height 哨兵**：上传结果自带真实尺寸，识别靠 image_url。
+          ...result,
           image_url: result.file_url || imageUrl,
-          width: 0,
-          height: 0,
         })
       } catch (error) {
         console.error('[GLM] Failed to upload image:', error)
+        storeManager.addLog('error',
+          `[GLM] 图片上传失败，本轮退化为纯文本: ${(error as Error).message}`)
       }
     }
 
     const preparedMessages = this.messagesToPrompt(messages, refs, toolsPrompt, false)
+
+    // 带图请求把最终 messages 打出来（截断）：模型"看不到图"时要能分辨是
+    // 部件没送出去，还是送出去但格式不对
+    if (refs.length > 0) {
+      storeManager.addLog('info',
+        `[GLM] 带图请求 refs=${JSON.stringify(refs).slice(0, 300)}`)
+      storeManager.addLog('info',
+        `[GLM] 带图请求 messages=${JSON.stringify(preparedMessages).slice(0, 1200)}`)
+    }
 
     let assistantId = DEFAULT_ASSISTANT_ID
     let chatMode = ''
