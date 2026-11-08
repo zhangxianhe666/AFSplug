@@ -927,7 +927,8 @@
     "output": "Output",
     "error": "Error",
     "k3AutoRefresh": "K3 Auto Refresh",
-    "k3AutoRefreshDesc": "Built-in one-click Kimi K3 token refresh: auto login window on first use, silent refresh afterwards; keeps the token fresh every 5 minutes while the app runs, no Python required"
+    "k3AutoRefreshDesc": "Built-in one-click Kimi K3 token refresh: auto login window on first use, invisible background refresh afterwards (no popups); keeps the token fresh every 5 minutes while the app runs, no Python required",
+    "k3AutoRefreshOffHint": "Keep-alive is off: the Kimi token expires in 15 minutes. Click Run to renew manually, or turn this switch back on."
   },
   "about": {
     "tagline": "Multi-platform AI Service Unified Management Tool",

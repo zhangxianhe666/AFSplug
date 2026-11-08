@@ -160,17 +160,38 @@ export class InAppLoginManager extends EventEmitter {
         }
       })
     } else {
-      // 静默模式：窗口移到屏幕外并显示（不抢焦点）。
-      // 关键：kimi.com 的 SPA 检测 document.hidden —— 窗口 show:false 时页面认为
-      // 不可见，JS 初始化/API 请求不执行，onBeforeSendHeaders 永远拦截不到
-      // Authorization 头（曾现：隐藏窗口 35s 超时，弹窗 9s 就捕获成功；
-      // backgroundThrottling:false 也无效，因为这是 visibility 检测不是节流）。
-      // 屏幕外可见窗口：页面认为可见、正常发请求，用户看不到、不打扰。
+      // 静默模式：页面必须"认为自己可见"（kimi.com 的 SPA 检测 document.hidden，
+      // 真隐藏就不发请求、拦不到 token），但用户绝不该看到窗口。
+      //
+      // 曾经的写法是"移出屏幕 + showInactive()"，在 macOS 上失效：系统对有标题栏
+      // 的窗口会在显示时执行 constrain frame to screen，把 (-6000, -5967) 强行
+      // 拉回 (0, 33)，于是每 5 分钟都有一个 500×700 的 kimi.com 窗口弹在屏幕
+      // 左上角（实测 getBounds 从 -6000 变 0）。
+      //
+      // 现在改成"留在原地但完全透明"：opacity=0 的窗口对 Chromium 仍是 visible
+      // （实测 document.visibilityState === 'visible'），肉眼不可见；再关掉鼠标
+      // 事件与焦点能力，避免一个看不见的窗口挡住点击。窗口只存活 5~10 秒。
+      currentWindow.setOpacity(0)
+      currentWindow.setIgnoreMouseEvents(true, { forward: true })
+      currentWindow.setFocusable(false)
+      currentWindow.setSkipTaskbar(true)
+      // 屏幕外定位在 Windows / Linux 上有效（那些平台不做 constrain），保留作为
+      // 第二道保险；macOS 上会被系统覆盖，由上面的 opacity=0 兜底。
       try {
         const wa = screen.getPrimaryDisplay().workArea
         currentWindow.setPosition(wa.x - 6000, wa.y - 6000)
       } catch { /* ignore */ }
       currentWindow.showInactive()
+    }
+
+    // 静默窗口的落地验证：确认它确实透明且被系统约束到了屏幕内（预期
+    // opacity=0、bounds 在屏幕内，但用户看不到）。排查"又弹窗了"时先看这行。
+    if (this.options?.showWindow === false) {
+      const b = currentWindow.getBounds()
+      dbg(
+        `silent window: opacity=${currentWindow.getOpacity()} visible=${currentWindow.isVisible()} ` +
+          `bounds=${b.x},${b.y},${b.width}x${b.height}`,
+      )
     }
 
     currentWindow.on('closed', () => {

@@ -927,7 +927,8 @@
     "output": "输出结果",
     "error": "错误信息",
     "k3AutoRefresh": "K3 自动刷新",
-    "k3AutoRefreshDesc": "内置一键刷新 Kimi K3 令牌：首次自动弹窗登录，之后静默刷新；应用运行期间每 5 分钟自动保持令牌新鲜，无需 Python 环境"
+    "k3AutoRefreshDesc": "内置一键刷新 Kimi K3 令牌：首次自动弹窗登录，之后后台隐形刷新（不弹窗）；应用运行期间每 5 分钟自动保持令牌新鲜，无需 Python 环境",
+    "k3AutoRefreshOffHint": "已关闭自动保活：Kimi 令牌 15 分钟后过期，需手动点「运行」续期，或重新打开此开关"
   },
   "about": {
     "tagline": "多平台 AI 服务统一管理工具",

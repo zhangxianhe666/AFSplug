@@ -125,6 +125,8 @@ export const IpcChannels = {
   SCRIPTS_LIST: 'scripts:list',
 
   KIMI_AUTO_REFRESH: 'kimi:autoRefresh',
+  KIMI_AUTO_REFRESH_SET: 'kimi:setAutoRefresh',
+  KIMI_AUTO_REFRESH_STATE: 'kimi:getAutoRefresh',
   GLM_AUTO_REFRESH: 'glm:autoRefresh',
 } as const
 

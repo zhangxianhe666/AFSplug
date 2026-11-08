@@ -5,7 +5,7 @@ import { createTrayManager, TrayManager } from './tray/TrayManager'
 import { registerIpcHandlers } from './ipc/handlers'
 import { UpdaterManager } from './updater'
 import { storeManager } from './store/store'
-import { refreshKimiToken } from './tokenRefresh'
+import { startKimiAutoRefresh, stopKimiAutoRefresh } from './kimiAutoRefresh'
 
 // Prevent uncaught exceptions from crashing the app
 process.on('uncaughtException', (error) => {
@@ -111,8 +111,8 @@ async function setupApp(): Promise<void> {
   await loadAppContent(mainWindow)
 
   // 应用运行期间自动保持 Kimi K3 token 新鲜：
-  // 每 5 分钟静默刷新一次（窗口不弹出）；无账户或会话未登录时静默跳过，
-  // 连续失败自动退避（5min → 10min → 30min），不打扰用户。
+  // 每 5 分钟静默刷新一次（隐形窗口，用户看不到）。
+  // 是否启用由脚本中心的「K3 自动刷新」开关决定（缺省开启）。
   startKimiAutoRefresh()
 
   if (process.env.NODE_ENV === 'development') {
@@ -121,44 +121,8 @@ async function setupApp(): Promise<void> {
 }
 
 // ── Kimi K3 定时自动刷新 ──────────────────────────────────────────
-let kimiRefreshTimer: NodeJS.Timeout | null = null
-let kimiRefreshFailures = 0
-
-const KIMI_REFRESH_BASE_INTERVAL = 5 * 60 * 1000
-
-function scheduleNextKimiRefresh(delayMs: number): void {
-  kimiRefreshTimer = setTimeout(async () => {
-    try {
-      const result = await refreshKimiToken({ silent: true })
-      kimiRefreshFailures = result.success ? 0 : kimiRefreshFailures + 1
-      if (result.success) {
-        console.log('[KimiAutoRefresh] 定时刷新成功')
-      } else {
-        console.log(`[KimiAutoRefresh] 定时刷新跳过（${kimiRefreshFailures}）: ${result.message}`)
-      }
-    } catch (error: any) {
-      kimiRefreshFailures++
-      console.error('[KimiAutoRefresh] 定时刷新异常:', error?.message || error)
-    }
-    // 失败退避：Kimi token 有效期仅 15 分钟，退避超过 5 分钟会让 token 在重试前
-    // 就过期（曾现 5→10→30min 退避导致 16:19 刷新成功后 17:36 仍 401）。
-    // 失败也固定 5 分钟重试，最多让 token 过期一个周期即可续上。
-    scheduleNextKimiRefresh(KIMI_REFRESH_BASE_INTERVAL)
-  }, delayMs)
-}
-
-function startKimiAutoRefresh(): void {
-  if (kimiRefreshTimer) return
-  // 启动 1 分钟后先试一次（等 store/账户就绪），之后按退避策略循环
-  scheduleNextKimiRefresh(60 * 1000)
-}
-
-function stopKimiAutoRefresh(): void {
-  if (kimiRefreshTimer) {
-    clearTimeout(kimiRefreshTimer)
-    kimiRefreshTimer = null
-  }
-}
+// 实现移到 ./kimiAutoRefresh，这里只保留生命周期挂钩：
+// 启动时按开关决定是否保活，退出时清理定时器。
 
 async function loadAppContent(mainWindow: BrowserWindow): Promise<void> {
   const isDev = process.env.NODE_ENV === 'development'

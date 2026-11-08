@@ -9,6 +9,7 @@ import { CustomProviderManager } from '../providers/custom'
 import { getBuiltinProviders, getBuiltinProvider } from '../providers/builtin'
 import { oauthManager } from '../oauth/manager'
 import { refreshKimiToken, refreshGlmToken } from '../tokenRefresh'
+import { getKimiAutoRefreshState, setKimiAutoRefreshEnabled } from '../kimiAutoRefresh'
 import { ProxyServer } from '../proxy/server'
 import { proxyStatusManager } from '../proxy/status'
 import { sessionManager } from '../proxy/sessionManager'
@@ -1029,6 +1030,17 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
       console.error('[KimiAutoRefresh IPC] Error:', error.message)
       return { success: false, message: error?.message || String(error) }
     }
+  })
+
+  // 脚本中心「K3 自动刷新」开关：读取真实状态 / 生效开关
+  // 之前 UI 的开关只往 store 写了一个没人读的 key，定时器在启动时无条件启动，
+  // 导致"显示关闭但每 5 分钟照旧刷新"。现在开关与定时器由同一模块管理。
+  ipcMain.handle(IpcChannels.KIMI_AUTO_REFRESH_STATE, async () => {
+    return getKimiAutoRefreshState()
+  })
+
+  ipcMain.handle(IpcChannels.KIMI_AUTO_REFRESH_SET, async (_event, enabled: boolean) => {
+    return setKimiAutoRefreshEnabled(!!enabled)
   })
 
   // GLM 自动刷新（内置实现，无需 python / Management API）

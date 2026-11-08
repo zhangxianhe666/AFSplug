@@ -44,7 +44,9 @@ const scripts: ScriptDefinition[] = [
     path: 'built-in',
     category: 'token',
     hasSchedule: true,
-    defaultEnabled: false,
+    // Kimi 的 access_token 只有 15 分钟寿命，保活默认开启；开关状态由主进程
+    // 的 kimiAutoRefresh 模块持有（这里只负责显示真实值）
+    defaultEnabled: true,
   },
   {
     id: 'check_source_artifacts',
@@ -59,6 +61,8 @@ const scripts: ScriptDefinition[] = [
 ]
 
 type ExecutionState = Record<string, { running: boolean; lastOutput: string; lastError: string; lastRun: number | null }>
+
+const KIMI_SCRIPT_ID = 'k3_auto_refresh'
 
 export function Scripts() {
   const { t } = useTranslation()
@@ -84,6 +88,32 @@ export function Scripts() {
       }
     }
     loadScripts()
+  }, [])
+
+  // 开关状态必须来自真实来源，否则会出现"显示关闭但后台照旧运行"：
+  // K3 的权威状态在主进程（定时器真实启停），其余脚本读持久化 key。
+  useEffect(() => {
+    const loadToggleStates = async () => {
+      const api = window.electronAPI
+      try {
+        const state: any = await api?.invoke('kimi:getAutoRefresh')
+        if (state && typeof state.enabled === 'boolean') {
+          setScriptToggles(prev => ({ ...prev, [KIMI_SCRIPT_ID]: state.enabled }))
+        }
+      } catch (error) {
+        console.warn('Failed to load Kimi auto refresh state:', error)
+      }
+      for (const script of scripts) {
+        if (script.id === KIMI_SCRIPT_ID) continue
+        try {
+          const stored = await api?.store?.get<boolean>(`scripts:${script.id}:enabled`)
+          if (typeof stored === 'boolean') {
+            setScriptToggles(prev => ({ ...prev, [script.id]: stored }))
+          }
+        } catch { /* ignore */ }
+      }
+    }
+    loadToggleStates()
   }, [])
 
   const runScript = useCallback(async (scriptId: string, scriptPath: string) => {
@@ -144,9 +174,25 @@ export function Scripts() {
     }
   }, [availableScripts])
 
-  const toggleScript = useCallback((scriptId: string, enabled: boolean) => {
+  const toggleScript = useCallback(async (scriptId: string, enabled: boolean) => {
     setScriptToggles(prev => ({ ...prev, [scriptId]: enabled }))
-    window.electronAPI?.store?.set(`scripts:${scriptId}:enabled`, enabled)
+    const api = window.electronAPI
+
+    // K3：主进程负责持久化 + 真正启停定时器，以它返回的状态为准
+    if (scriptId === KIMI_SCRIPT_ID) {
+      try {
+        const state: any = await api?.invoke('kimi:setAutoRefresh', enabled)
+        if (state && typeof state.enabled === 'boolean') {
+          setScriptToggles(prev => ({ ...prev, [scriptId]: state.enabled }))
+        }
+      } catch (error) {
+        console.warn('Failed to toggle Kimi auto refresh:', error)
+        setScriptToggles(prev => ({ ...prev, [scriptId]: !enabled }))
+      }
+      return
+    }
+
+    api?.store?.set(`scripts:${scriptId}:enabled`, enabled)
   }, [])
 
   const categoryGroups = {
@@ -218,6 +264,12 @@ export function Scripts() {
               </div>
 
               <p className="text-xs text-[var(--text-dim)] mb-3">{t(script.descKey)}</p>
+
+              {script.id === KIMI_SCRIPT_ID && !scriptToggles[script.id] && (
+                <p className="text-xs text-[var(--cyber-yellow)] mb-3">
+                  {t('scripts.k3AutoRefreshOffHint')}
+                </p>
+              )}
 
               {state?.lastRun && (
                 <div className="flex items-center gap-1.5 text-xs text-[var(--text-dim)] mb-2">
