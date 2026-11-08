@@ -182,7 +182,7 @@ export class RequestForwarder {
     provider?: Provider
   ): ToolCallingTransformResult {
     const config = storeManager.getConfig().toolCallingConfig
-    const engine = new ToolCallingEngine(config)
+    const engine = new ToolCallingEngine(config, (message) => storeManager.addLog('info', message))
 
     return engine.transformRequest({
       request,
@@ -202,7 +202,9 @@ export class RequestForwarder {
   }
 
   private applyToolCallsToResponse(result: any, transformed: ToolCallingTransformResult): void {
-    const engine = new ToolCallingEngine(storeManager.getConfig().toolCallingConfig)
+    const engine = new ToolCallingEngine(storeManager.getConfig().toolCallingConfig, (message) =>
+      storeManager.addLog('info', message),
+    )
     engine.applyNonStreamResponse(result, transformed.plan)
   }
 
@@ -620,7 +622,15 @@ export class RequestForwarder {
         }
       }
 
-      const handler = new GLMStreamHandler(actualModel, undefined, undefined, transformed.plan)
+      // 上游（chatglm.cn）不返回 usage，把提示词原文交给 handler 以便估算 prompt_tokens，
+      // 否则所有 GLM 请求在统计里都算 2 个 token。
+      const handler = new GLMStreamHandler(
+        actualModel,
+        undefined,
+        undefined,
+        transformed.plan,
+        buildPromptText(transformed.messages, transformed.tools),
+      )
       
       if (request.stream) {
         // GLM web 流式输出的是增量 part，会把文本 XML 拆碎导致实时解析失败。
@@ -1568,6 +1578,26 @@ export class RequestForwarder {
       }
     }
   }
+}
+
+/**
+ * 把 messages + tools 拼成一段纯文本，用于估算 prompt_tokens。
+ * 只服务于 GLM 这类不返回 usage 的适配器，不参与实际请求。
+ */
+function buildPromptText(messages: any[] = [], tools?: any): string {
+  const parts: string[] = []
+  for (const message of messages ?? []) {
+    const content = message?.content
+    if (typeof content === 'string') parts.push(content)
+    else if (Array.isArray(content)) {
+      for (const part of content) {
+        if (typeof part === 'string') parts.push(part)
+        else if (part && typeof part.text === 'string') parts.push(part.text)
+      }
+    }
+  }
+  if (tools) parts.push(JSON.stringify(tools))
+  return parts.join('\n')
 }
 
 export const requestForwarder = new RequestForwarder()
