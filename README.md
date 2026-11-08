@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.7.0-blue?style=flat-square&logo=github" alt="Release">
+  <img src="https://img.shields.io/badge/Release-v1.7.1-blue?style=flat-square&logo=github" alt="Release">
   <img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square" alt="License">
   <br>
   <a href="https://www.electronjs.org/"><img src="https://img.shields.io/badge/Electron-33+-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron"></a>
@@ -36,16 +36,23 @@
 - **多语言**：英文 / 简体中文
 - **现代化 UI**：暗色/亮色主题
 
-## 🆕 本分支新增（v1.7.0）
+## 🆕 本分支新增（v1.7.1）
 
-- **本地图片真正进入请求**：`@文件` 引用图片时，适配器会把本地图片读成字节并按各 provider 的原生通道送出 —— DeepSeek 走 `/v0/file/upload_file`（PoW 挑战按上传接口单独申请）后以 `ref_file_ids` 引用，GLM 复用其 `image_url` 附件通道；模型不再只看到一个文件名
-- **两条路由都覆盖**：经过 `ds-trim-gateway` 时消费网关注入的 `[[local-image:/abs/path]]` 标记；DSH 直连上游时用 `session workspace` + 引用标签自行还原绝对路径，不依赖网关
-- **失败即降级**：上传/读盘失败一律退回纯文本，绝不阻断对话；本地路径从 prompt 中剥离，不会泄露到上游
-- **DeepSeek 错误不再静默**：上游用 `HTTP 200 + JSON 错误体` 报错（如 `40301 INVALID_POW_RESPONSE`）时，现在会记录日志并让请求真正失败，而不是表现为"空响应"
-- **图片引用被拒自动恢复**：识别 `biz_code 9 / invalid ref file id` 后清空被污染的会话缓存，下一轮自动换新会话，无需重启
+- **工具调用解析容错**：模型偶发用中文全角引号写 `<invoke name=“Bash”>`，严格正则匹配不到，整段 XML 不报错也不解析、当普通文本透传，界面表现是"模型没调用工具"；现在会自动规范化重试。同时支持裸标签参数（`<command>x</command>`）与 `argument1/arg1/args` 这类占位参数名
+- **失败不再被包装成成功**：客户端工具失败仍以 `status=completed` 回传，失败只在正文里，模型看到"有内容"就回"已完成 ✅"并给出不存在的路径。现在命中非零退出码、被信号杀死、Python/Node 崩溃，以及 **POSIX 与 Windows（cmd / PowerShell，中英文）** 的错误文案时，会前置 `[TOOL_ERROR]` 横幅并禁止宣称完成
+- **贴链接不再触发"网页助手"人格**：system 中的裸链接替换为 `[链接]`（模型看到 system 里的 http 地址会幻觉 `open_url` 工具）；user 中的链接**保留完整地址**，只包成 `<user_link>…</user_link>` 并附抓取指引，代码块、markdown 链接、图片 URL 与非文本部件都不动
+- **Kimi 静默刷新不再弹窗**：原方案"把窗口移到屏幕外"在 macOS 上被 constrain-to-screen 强行拉回屏幕左上角，每 5 分钟露出一次；改为 `opacity=0` + 忽略鼠标 + 不抢焦点，窗口对 Chromium 仍算 visible，SPA 照常发请求但肉眼完全不可见
+- **自动刷新开关变成真开关**：此前 UI 初始值写死为关闭、从不读持久化，切换只写一个无人读取的 key，定时器与开关零关联；现在默认开启（Kimi 令牌仅 15 分钟寿命）、切换即真正启停定时器，关闭时卡片会提示需手动续期
+- **GLM 令牌被吊销后自动续期**：此前没有 401 处理，而本地缓存时长是写死的 1 小时假设值，网页端退出登录或异地登录被踢后，最长一小时内所有 GLM 请求全部失败；现在收到 401 会清缓存、换新 token 并重试一次（签名与新 nonce 在重试闭包内重新生成）
+- **提示词预算修正**：工具清单曾把客户端自己的 system 挤到 3,000 字符，客户端行为准则被截断；改为清单超阈值走紧凑格式（41,390 → 7,402 字符），总预算 20,000 / 客户端保留 12,000
 
 ### 历史版本要点
 
+- **本地图片真正进入请求**（v1.7.0）：`@文件` 引用图片时，适配器会把本地图片读成字节并按各 provider 的原生通道送出 —— DeepSeek 走 `/v0/file/upload_file`（PoW 挑战按上传接口单独申请）后以 `ref_file_ids` 引用，GLM 复用其 `image_url` 附件通道；模型不再只看到一个文件名
+- **两条路由都覆盖**（v1.7.0）：经过 `ds-trim-gateway` 时消费网关注入的 `[[local-image:/abs/path]]` 标记；DSH 直连上游时用 `session workspace` + 引用标签自行还原绝对路径，不依赖网关
+- **失败即降级**（v1.7.0）：上传/读盘失败一律退回纯文本，绝不阻断对话；本地路径从 prompt 中剥离，不会泄露到上游
+- **DeepSeek 错误不再静默**（v1.7.0）：上游用 `HTTP 200 + JSON 错误体` 报错（如 `40301 INVALID_POW_RESPONSE`）时，现在会记录日志并让请求真正失败，而不是表现为"空响应"
+- **图片引用被拒自动恢复**（v1.7.0）：识别 `biz_code 9 / invalid ref file id` 后清空被污染的会话缓存，下一轮自动换新会话，无需重启
 - **仓库结构扁平化**（v1.6.0）：移除 `Chat2API/` 中间层，应用代码与配置直接位于仓库根目录；Git 历史经 rename 完整保留
 - **应用更名为 AFS**（v1.6.0）：菜单栏/Dock、快捷方式、桌面项、窗口标题、托盘与关于页统一显示 **AFS**，同时保留 `~/.chat2api/` 数据目录、钥匙串条目与 localStorage 键，老用户零迁移
 - **工具调用参数归一化**（v1.5.9）：新增 `normalizeToolArguments`，将字符串形态的数组参数（如 `web_search.queries`）自动还原为数组，修复 GLM-5.3 等模型因参数类型不符被客户端拦截的故障
@@ -93,8 +100,8 @@ npm run build:all    # 全平台
 打 `v*` 标签触发 GitHub Actions 五平台并行构建：
 
 ```bash
-git tag v1.7.0
-git push origin v1.7.0
+git tag v1.7.1
+git push origin v1.7.1
 ```
 
 > 注意：electron-builder 默认创建 Draft Release，发布后需手动执行
