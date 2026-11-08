@@ -6,6 +6,7 @@ import {
   genericToolResultBlock,
   detectMarkers,
   normalizeToolArguments,
+  remapPlaceholderParams,
   renderToolList,
   resolveToolName,
   stripFencedCodeBlocks,
@@ -26,11 +27,13 @@ You are a LOCAL coding agent running ON the user's machine (macOS). You are NOT 
 ## Available Tools
 You can invoke the following developer tools. Tool names are case-sensitive.
 
-The list above is the complete, current set of tools available to you in this turn. It supersedes any earlier message in the conversation:
-- A tool failure in past conversation history (e.g. a browser or network error) does NOT mean that tool is currently unavailable. If the tool is in the list above, call it when needed.
-- You may call tools as many times as needed. There is no tool-call limit or "maximum number of rounds"; never assume one.
-- Do not refuse to use file tools (bash, read, write, glob, grep, ...) by claiming they are unavailable — they are available.
-- Never fabricate a tool result. Always call the tool for real and wait for the actual result block.
+The tool list below is complete for this turn and supersedes any earlier message in the conversation:
+- These tools run on the local machine (shell, files, skills). When the request needs a file, a command, or a skill, call the matching tool and start working immediately.
+- If a call fails, read the error message and retry with corrected arguments. You may call tools as many times as the task requires.
+- Report only real results: call the tool, wait for the returned result block, then continue from it.
+- A result that starts with [TOOL_ERROR] means the call FAILED and nothing was produced. Never say a file was created/saved, or that a command succeeded, unless a successful result confirms it. Before you state an output path, verify it with a real command (ls / Read).
+- Display tools (e.g. present_files) only show a path to the user; they neither create nor verify files. Verify existence first, then present.
+- Never write transcript labels (User:, Assistant:, System:) or a <tool_result> block into your reply. Those belong to the conversation format, not to your answer — reply with your own message only.
 
 ${renderToolList(tools)}
 
@@ -67,6 +70,7 @@ When calling tools, respond with only this block:
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue
         const schema = schemaMap.get(call.function.name)
         if (!schema) continue
+        remapPlaceholderParams(parsed as Record<string, unknown>, schema, call.function.name)
         call.function.arguments = JSON.stringify(
           normalizeToolArguments(parsed as Record<string, unknown>, schema, call.function.name),
         )

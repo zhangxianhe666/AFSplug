@@ -4,6 +4,7 @@ import { managedBracketProtocol } from '../../src/main/proxy/toolCalling/protoco
 import { managedXmlProtocol } from '../../src/main/proxy/toolCalling/protocols/managedXml.ts'
 import { anthropicToolUseProtocol } from '../../src/main/proxy/toolCalling/protocols/anthropicToolUse.ts'
 import { codexResponsesProtocol } from '../../src/main/proxy/toolCalling/protocols/codexResponses.ts'
+import { isToolResultFailure } from '../../src/main/proxy/toolCalling/protocols/shared.ts'
 
 const tools = [
   {
@@ -305,4 +306,248 @@ test('managed xml does not recover from prose that merely mentions a parameter n
   )
 
   assert.equal(result.toolCalls.length, 0)
+})
+
+// —— 回归：GLM-5.3 实况输出的参数格式退化 ——
+// 实测（2026-11-04）GLM-5.3 在长上下文下会把参数写成裸标签 `<command>x</command>`，
+// 或把参数名写成占位符 `argument1`。旧解析只认 `<parameter name="X">`，参数整批丢失，
+// 再被必填补齐成空串 → 工具以空参数执行，表现为「技能/命令调不起来」。
+
+const bashTools = [
+  {
+    name: 'Bash',
+    description: 'Run a shell command',
+    parameters: {
+      type: 'object',
+      properties: { command: { type: 'string' } },
+      required: ['command'],
+    },
+    source: 'openai' as const,
+  },
+]
+
+test('managed xml recovers bare-tag parameters inside a wrapped tool_calls block', () => {
+  const result = managedXmlProtocol.parse(
+    '<tool_calls><invoke name="Bash"><command>ls /tmp | head -3</command></invoke></tool_calls>',
+    { tools: bashTools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 1)
+  assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), {
+    command: 'ls /tmp | head -3',
+  })
+})
+
+test('managed xml maps placeholder parameter names onto the single required parameter', () => {
+  const result = managedXmlProtocol.parse(
+    '<tool_calls><invoke name="Bash"><parameter name="argument1">pwd</parameter></invoke></tool_calls>',
+    { tools: bashTools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 1)
+  assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), { command: 'pwd' })
+})
+
+test('managed xml recovers bare-tag parameters from an unwrapped bare invoke', () => {
+  const result = managedXmlProtocol.parse(
+    '<invoke name="Bash"><command>whoami</command></invoke>',
+    { tools: bashTools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 1)
+  assert.equal(result.toolCalls[0].function.name, 'Bash')
+  assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), { command: 'whoami' })
+})
+
+test('managed xml parses an unwrapped plain invoke even when several tools share the parameter name', () => {
+  // 回归：Skill / Bash 都用 `command` 参数。旧实现只认 <|CHAT2API|invoke> 形式的裸块，
+  // 纯 XML 的 <invoke name="Bash"> 会落到 schema 宽容提取，因「候选多于 1 个」被整体放弃。
+  const tools = [
+    { name: 'Skill', description: 'load skill', parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] }, source: 'openai' as const },
+    { name: 'Bash', description: 'run shell', parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] }, source: 'openai' as const },
+  ]
+
+  const result = managedXmlProtocol.parse('<invoke name="Bash"><command>ls /tmp</command></invoke>', {
+    tools,
+    protocol: 'managed_xml',
+  })
+
+  assert.equal(result.toolCalls.length, 1)
+  assert.equal(result.toolCalls[0].function.name, 'Bash')
+  assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), { command: 'ls /tmp' })
+})
+
+test('managed xml does not double-parse an invoke wrapped in tool_calls', () => {
+  const result = managedXmlProtocol.parse(
+    '<tool_calls><invoke name="Bash"><parameter name="command">pwd</parameter></invoke></tool_calls>',
+    { tools: bashTools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 1)
+  assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), { command: 'pwd' })
+})
+
+// ── 工具失败结果标注 ───────────────────────────────────────────────
+// 真实回归：GLM 拿到 `Exit Code: 1 / ModuleNotFoundError` 的工具结果后仍回复
+// 「PPT 已生成完毕 ✅」并给出不存在的路径，用户按路径找不到文件。
+
+test('tool result with non-zero exit code is marked as failure', () => {
+  const result = managedXmlProtocol.formatToolResult({
+    toolCallId: 'call_1',
+    content: 'Command: python3 build.py\nStdout: Traceback (most recent call last):\n  File "build.py", line 1\nModuleNotFoundError: No module named \'pptx\'\n\nExit Code: 1',
+  })
+
+  assert.match(result, /\[TOOL_ERROR\]/)
+  assert.match(result, /did NOT succeed/)
+})
+
+test('tool result reporting a missing file is marked as failure', () => {
+  const content = 'Command: ls -la "AI发展.pptx"\nStdout: ls: AI发展.pptx: No such file or directory\nExit Code: 1'
+  const result = managedXmlProtocol.formatToolResult({ toolCallId: 'call_2', content })
+
+  assert.match(result, /\[TOOL_ERROR\]/)
+})
+
+test('tool result killed by signal (timeout 137) is marked as failure', () => {
+  const content = 'Command: python3 build.py\nStdout: (empty)\nStderr: (empty)\nExit Code: 137\nSignal: SIGTERM'
+  const result = managedXmlProtocol.formatToolResult({ toolCallId: 'call_3', content })
+
+  assert.match(result, /\[TOOL_ERROR\]/)
+})
+
+test('successful tool result is not marked as failure', () => {
+  const content = 'Command: ls -la "AI发展.pptx"\nStdout: -rw-r--r--  1 user staff 7262 Nov  5 12:05 AI发展.pptx\nExit Code: 0'
+  const result = managedXmlProtocol.formatToolResult({ toolCallId: 'call_4', content })
+
+  assert.ok(!result.includes('[TOOL_ERROR]'))
+})
+
+test('ordinary text mentioning "error" is not treated as a failure', () => {
+  const content = 'Command: grep -rn "error" logs/\nStdout: src/a.ts:12: // error handling\nExit Code: 0'
+  const result = managedBracketProtocol.formatToolResult({ toolCallId: 'call_5', content })
+
+  assert.ok(!result.includes('[TOOL_ERROR]'))
+})
+
+test('protocol prompt forbids claiming success without verification', () => {
+  for (const protocol of [managedXmlProtocol, managedBracketProtocol]) {
+    const prompt = protocol.renderPrompt(tools)
+    assert.match(prompt, /\[TOOL_ERROR\]/)
+    assert.match(prompt, /present_files/)
+  }
+})
+
+// ── 全角引号容错 ─────────────────────────────────────────────────
+// 真实回归（11-05 12:17）：GLM 输出 `<invoke name=“Bash”>`（中文全角引号），
+// 严格正则匹配失败，整段 XML 当普通文本透传，界面表现为「模型没有调用工具」。
+
+test('managed xml parses tool call written with full-width quotes', () => {
+  const result = managedXmlProtocol.parse(
+    '<tool_calls><invoke name=“Bash”><parameter name=“command”>ls /tmp</parameter></invoke></tool_calls>',
+    { tools: bashTools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 1)
+  assert.equal(result.toolCalls[0].function.name, 'Bash')
+  assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), { command: 'ls /tmp' })
+  // 工具块不应作为正文残留
+  assert.equal(result.content, '')
+})
+
+test('managed xml parses bare invoke written with full-width quotes', () => {
+  const result = managedXmlProtocol.parse('<invoke name=“Bash”><command>pwd</command></invoke>', {
+    tools: bashTools,
+    protocol: 'managed_xml',
+  })
+
+  assert.equal(result.toolCalls.length, 1)
+  assert.deepEqual(JSON.parse(result.toolCalls[0].function.arguments), { command: 'pwd' })
+})
+
+test('plain prose with Chinese quotes is left untouched', () => {
+  const text = '第 1 页标题是“AI 短剧制作”，副标题“从创意到成片”。'
+  const result = managedXmlProtocol.parse(text, { tools: bashTools, protocol: 'managed_xml' })
+
+  assert.equal(result.toolCalls.length, 0)
+  assert.equal(result.content, text)
+})
+
+test('hallucinated tool_result block is stripped from reply content', () => {
+  const result = managedXmlProtocol.parse(
+    '校验脚本缺 schema 文件，继续渲染。\n\nUser: <tool_result tool_call_id="call_0">Command: soffice.py\nStdout: Generated 2 PDF page(s)</tool_result>\n\n收尾：文件已生成。',
+    { tools: bashTools, protocol: 'managed_xml' },
+  )
+
+  assert.ok(!result.content.includes('<tool_result'))
+  assert.ok(!result.content.includes('Generated 2 PDF page(s)'))
+  assert.match(result.content, /校验脚本缺 schema 文件/)
+  assert.match(result.content, /文件已生成/)
+})
+
+// ── Windows 失败文案 ───────────────────────────────────────────────
+// 背景：TOOL_FAILURE_PATTERNS 原先只覆盖 POSIX 文案（No such file or directory /
+// command not found / Permission denied），Windows 的 cmd 与 PowerShell 输出完全
+// 不同，导致同一套「假成功」防护在 Windows 上失效。这里逐条锁住各变体。
+
+test('windows cmd: Chinese "不是内部或外部命令" is a failure', () => {
+  assert.ok(isToolResultFailure('"python" 不是内部或外部命令，也不是可运行的程序或批处理文件。'))
+})
+
+test('windows cmd: English "is not recognized as an internal or external command" is a failure', () => {
+  assert.ok(
+    isToolResultFailure(
+      "'python' is not recognized as an internal or external command,\noperable program or batch file.",
+    ),
+  )
+})
+
+test('windows powershell: English cmdlet error is a failure', () => {
+  assert.ok(
+    isToolResultFailure(
+      "python : The term 'python' is not recognized as the name of a cmdlet, function, script file, or operable program.",
+    ),
+  )
+})
+
+test('windows powershell: Chinese "识别为 cmdlet" is a failure', () => {
+  assert.ok(isToolResultFailure('无法将“python”项识别为 cmdlet、函数、脚本文件或可运行程序的名称。'))
+})
+
+test('windows: "The system cannot find the file specified" is a failure', () => {
+  assert.ok(isToolResultFailure('ERROR: The system cannot find the file specified.'))
+  assert.ok(isToolResultFailure('系统找不到指定的文件。'))
+})
+
+test('windows: missing path is a failure', () => {
+  assert.ok(isToolResultFailure('The system cannot find the path specified.'))
+  assert.ok(isToolResultFailure('系统找不到指定的路径。'))
+})
+
+test('windows: access denied is a failure', () => {
+  assert.ok(isToolResultFailure('Access is denied.'))
+  assert.ok(isToolResultFailure('拒绝访问。'))
+})
+
+test('windows success output is not treated as failure', () => {
+  const dirListing = [
+    '    Directory: C:\\Users\\me\\project',
+    '',
+    'Mode                 LastWriteTime         Length Name',
+    '----                 -------------         ------ ----',
+    '-a---          2026/11/8    13:50           7262 报告.pptx',
+  ].join('\n')
+  assert.ok(!isToolResultFailure(dirListing))
+})
+
+test('windows failure result is decorated with the failure banner', () => {
+  const content = [
+    'Command: python build.py',
+    'Stdout: (empty)',
+    "Stderr: 'python' is not recognized as an internal or external command,",
+    'Exit Code: 9009',
+  ].join('\n')
+
+  const result = managedXmlProtocol.formatToolResult({ toolCallId: 'call_win', content })
+  assert.match(result, /\[TOOL_ERROR\]/)
+  assert.match(result, /\[TOOL_ERROR\][\s\S]*not recognized as an internal or external command/)
 })

@@ -4,10 +4,13 @@ import {
   addParameter,
   buildToolCall,
   createParseResult,
+  decorateToolResult,
   detectMarkers,
   escapeXmlAttribute,
   normalizeToolArguments,
+  normalizeSmartQuotes,
   parseJsonValue,
+  remapPlaceholderParams,
   renderToolList,
   resolveToolName,
   stripFencedCodeBlocks,
@@ -32,13 +35,15 @@ You are a LOCAL coding agent running ON the user's machine (macOS). You are NOT 
 
 ## Available Tools
 You can invoke the following developer tools. Tool names are case-sensitive.
-Use only the exact tool names listed below. Do not rename, camelCase, translate, shorten, or invent tool names. In particular, there is NO tool named "open_url" — do not claim you only have a web-opening tool. The tools below include file tools (bash, read, write, glob, grep) that access the local machine.
+Use the exact tool names listed below; do not rename, camelCase, translate, shorten, or invent tool names.
 
-The list above is the complete, current set of tools available to you in this turn. It supersedes any earlier message in the conversation:
-- A tool failure in past conversation history (e.g. a browser or network error) does NOT mean that tool is currently unavailable. If the tool is in the list above, call it when needed.
-- You may call tools as many times as needed. There is no tool-call limit or "maximum number of rounds"; never assume one.
-- Do not refuse to use file tools (bash, read, write, glob, grep, ...) by claiming they are unavailable — they are available.
-- Never fabricate a tool result. Always call the tool for real and wait for the actual result block.
+The tool list below is complete for this turn and supersedes any earlier message in the conversation:
+- These tools run on the local machine (shell, files, skills). When the request needs a file, a command, or a skill, call the matching tool and start working immediately.
+- If a call fails, read the error message and retry with corrected arguments. You may call tools as many times as the task requires.
+- Report only real results: call the tool, wait for the returned result block, then continue from it.
+- A result that starts with [TOOL_ERROR] means the call FAILED and nothing was produced. Never say a file was created/saved, or that a command succeeded, unless a successful result confirms it. Before you state an output path, verify it with a real command (ls / Read).
+- Display tools (e.g. present_files) only show a path to the user; they neither create nor verify files. Verify existence first, then present.
+- Never write transcript labels (User:, Assistant:, System:) or a <tool_result> block into your reply. Those belong to the conversation format, not to your answer — reply with your own message only.
 
 ${renderToolList(tools)}
 
@@ -62,138 +67,204 @@ Tool results will be provided back to you as a tool result block.`
   },
 
   parse(content: string, context: ToolParseContext) {
-    const parseable = stripFencedCodeBlocks(content)
-    const allowedNames = toolNames(context.tools)
-    const schemaMap = toolSchemaMap(context.tools)
-    const rawMatches: string[] = []
-    const invalidToolNames: string[] = []
-    const toolCalls: ReturnType<typeof buildToolCall>[] = []
+    // 模型偶尔用中文全角引号写属性（<invoke name=“Bash”>），严格正则匹配不到，
+    // 整段 XML 会被当作普通文本透传给客户端 —— 界面表现就是「模型没有调用工具」。
+    // 这里先按原文解析，失败后再按规范化文本（引号转 ASCII）重试一次。
+    const run = (source: string) => {
+      const parseable = stripFencedCodeBlocks(source)
+      const allowedNames = toolNames(context.tools)
+      const schemaMap = toolSchemaMap(context.tools)
+      const rawMatches: string[] = []
+      const invalidToolNames: string[] = []
+      const toolCalls: ReturnType<typeof buildToolCall>[] = []
 
-    /**
-     * 按工具 schema 归一化参数（类型纠正 + 必填补齐 + 删未声明字段）。
-     * 统一在出口处对全部解析路径生效（严格 / 裸 invoke / 宽容恢复）。
-     */
-    const normalizeCalls = (calls: ReturnType<typeof buildToolCall>[]) => {
-      for (const call of calls) {
-        let parsed: unknown
-        try {
-          parsed = JSON.parse(call.function.arguments)
-        } catch {
-          continue
+      /**
+       * 按工具 schema 归一化参数（类型纠正 + 必填补齐 + 删未声明字段）。
+       * 统一在出口处对全部解析路径生效（严格 / 裸 invoke / 宽容恢复）。
+       */
+      const normalizeCalls = (calls: ReturnType<typeof buildToolCall>[]) => {
+        for (const call of calls) {
+          let parsed: unknown
+          try {
+            parsed = JSON.parse(call.function.arguments)
+          } catch {
+            continue
+          }
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue
+          const schema = schemaMap.get(call.function.name)
+          if (!schema) continue
+          remapPlaceholderParams(parsed as Record<string, unknown>, schema, call.function.name)
+          const normalized = normalizeToolArguments(
+            parsed as Record<string, unknown>,
+            schema,
+            call.function.name,
+          )
+          // 必填参数仍为空时大声记一笔：客户端会以「缺参数」拒绝执行，
+          // 属于参数解析没兜住，需要按这条日志回头补解析规则。
+          const required = Array.isArray(schema.required) ? (schema.required as string[]) : []
+          const emptyRequired = required.filter((key) => {
+            const v = normalized[key]
+            return v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0)
+          })
+          if (emptyRequired.length > 0) {
+            console.warn(
+              `[managedXml] ${call.function.name}: 必填参数 ${emptyRequired.join(', ')} 为空（原始参数键: ${Object.keys(parsed as object).join(', ') || '无'}）`,
+            )
+          }
+          call.function.arguments = JSON.stringify(normalized)
         }
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue
-        const schema = schemaMap.get(call.function.name)
-        if (!schema) continue
-        const normalized = normalizeToolArguments(
-          parsed as Record<string, unknown>,
-          schema,
-          call.function.name,
-        )
-        call.function.arguments = JSON.stringify(normalized)
+        return calls
       }
-      return calls
-    }
 
-    parseBlocks(parseable, {
-      blockPattern: /<\|CHAT2API\|tool_calls>([\s\S]*?)<\/\|CHAT2API\|tool_calls>/g,
-      invokePattern: /<\|CHAT2API\|invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT2API\|invoke>/g,
-      parameterPattern: /<\|CHAT2API\|parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT2API\|parameter>/g,
-      rawMatches,
-      invalidToolNames,
-      allowedNames,
-      toolCalls,
-    })
+      parseBlocks(parseable, {
+        blockPattern: /<\|CHAT2API\|tool_calls>([\s\S]*?)<\/\|CHAT2API\|tool_calls>/g,
+        invokePattern: /<\|CHAT2API\|invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT2API\|invoke>/g,
+        parameterPattern: /<\|CHAT2API\|parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT2API\|parameter>/g,
+        rawMatches,
+        invalidToolNames,
+        allowedNames,
+        toolCalls,
+        schemaMap,
+      })
 
-    parseBlocks(parseable, {
-      blockPattern: /<tool_calls>([\s\S]*?)<\/tool_calls>/g,
-      invokePattern: /<invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/invoke>/g,
-      parameterPattern: /<parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/parameter>/g,
-      rawMatches,
-      invalidToolNames,
-      allowedNames,
-      toolCalls,
-    })
+      parseBlocks(parseable, {
+        blockPattern: /<tool_calls>([\s\S]*?)<\/tool_calls>/g,
+        invokePattern: /<invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/invoke>/g,
+        parameterPattern: /<parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/parameter>/g,
+        rawMatches,
+        invalidToolNames,
+        allowedNames,
+        toolCalls,
+        schemaMap,
+      })
 
-    // 裸 <|CHAT2API|invoke> 块：模型常省略 <|CHAT2API|tool_calls> 包裹标记，
-    // 直接输出 invoke 块（GLM-5.3 文本模式常见行为）。先从 parseable 剥离已匹配的包裹块，避免重复解析。
-    let remaining = parseable
-    for (const raw of rawMatches) remaining = remaining.replace(raw, '')
-    const bareInvokePattern = /<\|CHAT2API\|invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT2API\|invoke>/g
-    let bareMatch: RegExpExecArray | null
-    while ((bareMatch = bareInvokePattern.exec(remaining)) !== null) {
-      rawMatches.push(bareMatch[0])
-      const rawName = bareMatch[1].trim()
-      const name = resolveToolName(rawName, allowedNames) ?? rawName
-      if (!allowedNames.has(name)) {
-        invalidToolNames.push(rawName)
-        continue
+      // 裸 invoke 块：模型常省略 <tool_calls> / <|CHAT2API|tool_calls> 包裹标记，
+      // 直接输出 invoke 块（GLM-5.3 文本模式常见行为）。先从 parseable 剥离已匹配的
+      // 包裹块，避免同一个 invoke 被重复解析。
+      let remaining = parseable
+      for (const raw of rawMatches) remaining = remaining.replace(raw, '')
+
+      const barePasses: Array<{ invokePattern: RegExp; parameterPattern: RegExp }> = [
+        {
+          invokePattern: /<\|CHAT2API\|invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT2API\|invoke>/g,
+          parameterPattern: /<\|CHAT2API\|parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT2API\|parameter>/g,
+        },
+        {
+          // 纯 XML 写法的裸 invoke：`<invoke name="Bash"><command>ls</command></invoke>`。
+          // 旧实现只认带 <|CHAT2API|> 前缀的裸 invoke，这种写法会落到「宽容提取」，
+          // 而多个工具的 schema 里都有 command 时会因「无法确定工具名」被整体放弃。
+          invokePattern: /<invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/invoke>/g,
+          parameterPattern: /<parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/parameter>/g,
+        },
+      ]
+
+      for (const pass of barePasses) {
+        const matches: RegExpExecArray[] = []
+        let bareMatch: RegExpExecArray | null
+        pass.invokePattern.lastIndex = 0
+        while ((bareMatch = pass.invokePattern.exec(remaining)) !== null) matches.push(bareMatch)
+
+        for (const invokeMatch of matches) {
+          rawMatches.push(invokeMatch[0])
+          const rawName = invokeMatch[1].trim()
+          const name = resolveToolName(rawName, allowedNames) ?? rawName
+          if (!allowedNames.has(name)) {
+            invalidToolNames.push(rawName)
+            continue
+          }
+          if (name !== rawName) {
+            // 模型轻微幻觉工具名（如 run_bash / Bash），模糊纠正后执行
+            console.log(`[managedXml] 工具名模糊纠正: '${rawName}' → '${name}'`)
+          }
+          const args: Record<string, unknown> = {}
+          const schema = schemaMap.get(name)
+          let parameterMatch: RegExpExecArray | null
+          pass.parameterPattern.lastIndex = 0
+          while ((parameterMatch = pass.parameterPattern.exec(invokeMatch[2])) !== null) {
+            addParameter(args, parameterMatch[1].trim(), parseJsonValue(parameterMatch[2]))
+          }
+          if (schema) extractSchemaTagParams(invokeMatch[2], schema, name, args)
+          remapPlaceholderParams(args, schema, name)
+          toolCalls.push(
+            buildToolCall(
+              `call_${toolCalls.length}`,
+              toolCalls.length,
+              name,
+              JSON.stringify(args),
+              invokeMatch[0],
+            ),
+          )
+        }
+
+        // 已消费的 invoke 从剩余文本中移除，防止下一轮重复匹配
+        for (const invokeMatch of matches) remaining = remaining.replace(invokeMatch[0], '')
       }
-      if (name !== rawName) {
-        // 模型轻微幻觉工具名（如 run_bash / Bash），模糊纠正后执行
-        console.log(`[managedXml] 工具名模糊纠正: '${rawName}' → '${name}'`)
-      }
-      const args: Record<string, unknown> = {}
-      const parameterPattern = /<\|CHAT2API\|parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/\|CHAT2API\|parameter>/g
-      let parameterMatch: RegExpExecArray | null
-      while ((parameterMatch = parameterPattern.exec(bareMatch[2])) !== null) {
-        addParameter(args, parameterMatch[1].trim(), parseJsonValue(parameterMatch[2]))
-      }
-      toolCalls.push(
-        buildToolCall(`call_${toolCalls.length}`, toolCalls.length, name, JSON.stringify(args), bareMatch[0]),
-      )
-    }
 
-    if (toolCalls.length === 0) {
-      // 严格解析未产出任何工具调用。若内容实际包含工具调用起始标记（模型输出
-      // 未闭合/损坏——例如某个 parameter 的闭合标签写错、或流被截断，导致整块
-      // 无法被严格正则匹配），则宽容提取：识别 invoke 名称 + 至少一个完整闭合
-      // 的 parameter，尽力恢复工具调用，避免整段 XML 作为普通文本泄漏给客户端。
-      tryExtractPartialToolCalls(parseable, allowedNames, rawMatches, invalidToolNames, toolCalls)
-
-      // 仍然失败时再按 schema 做一轮宽容恢复：模型有时把参数名/工具名直接当标签
-      // （<queries>、<web_search>），上面两条路径都认不出。
-      const recoveredSpans: string[] = []
       if (toolCalls.length === 0) {
-        tryExtractSchemaDrivenCalls(
-          parseable,
-          context.tools,
-          allowedNames,
-          invalidToolNames,
-          recoveredSpans,
-          toolCalls,
-        )
-      }
+        // 严格解析未产出任何工具调用。若内容实际包含工具调用起始标记（模型输出
+        // 未闭合/损坏——例如某个 parameter 的闭合标签写错、或流被截断，导致整块
+        // 无法被严格正则匹配），则宽容提取：识别 invoke 名称 + 至少一个完整闭合
+        // 的 parameter，尽力恢复工具调用，避免整段 XML 作为普通文本泄漏给客户端。
+        tryExtractPartialToolCalls(parseable, allowedNames, rawMatches, invalidToolNames, toolCalls, schemaMap)
 
-      // 只有真的恢复出调用时才清理 content；否则保持原样，避免误删正文里
-      // 只是「提到」标签的普通文字。
+        // 仍然失败时再按 schema 做一轮宽容恢复：模型有时把参数名/工具名直接当标签
+        // （<queries>、<web_search>），上面两条路径都认不出。
+        const recoveredSpans: string[] = []
+        if (toolCalls.length === 0) {
+          tryExtractSchemaDrivenCalls(
+            parseable,
+            context.tools,
+            allowedNames,
+            invalidToolNames,
+            recoveredSpans,
+            toolCalls,
+          )
+        }
+
+      // 工具调用块只在真的恢复出调用时才从正文剔除，避免误删只是「提到」标签的文字；
+      // 但幻觉出来的 <tool_result> 无论有没有调用都必须清掉——那是 AFS 注入给模型看的
+      // 格式，出现在回答里就是内部信息泄漏。
       const recoveredContent =
         toolCalls.length > 0
-          ? [...rawMatches, ...recoveredSpans]
-              .reduce((acc, raw) => acc.replace(raw, ''), parseable)
-              .trim()
-          : content
+          ? stripHallucinatedToolResults(
+              [...rawMatches, ...recoveredSpans].reduce((acc, raw) => acc.replace(raw, ''), parseable),
+            ).trim()
+          : stripHallucinatedToolResults(content).trim()
 
+        return createParseResult({
+          content: recoveredContent,
+          toolCalls: normalizeCalls(toolCalls),
+          protocol: rawMatches.length > 0 || toolCalls.length > 0 ? 'managed_xml' : 'unknown',
+          rawMatches: [...rawMatches, ...recoveredSpans],
+          invalidToolNames,
+        })
+      }
+
+      const cleanContent = stripHallucinatedToolResults(
+        rawMatches.reduce((acc, raw) => acc.replace(raw, ''), parseable),
+      ).trim()
       return createParseResult({
-        content: recoveredContent,
+        content: cleanContent,
         toolCalls: normalizeCalls(toolCalls),
-        protocol: rawMatches.length > 0 || toolCalls.length > 0 ? 'managed_xml' : 'unknown',
-        rawMatches: [...rawMatches, ...recoveredSpans],
+        protocol: 'managed_xml',
+        rawMatches,
         invalidToolNames,
       })
     }
 
-    const cleanContent = rawMatches
-      .reduce((acc, raw) => acc.replace(raw, ''), parseable)
-      // 模型自编的 tool_result 块（模拟工具执行的幻觉文本）也应从 content 中清除
-      .replace(/<\|CHAT2API\|tool_result[\s\S]*?<\/\|CHAT2API\|tool_result>/g, '')
-      .trim()
-    return createParseResult({
-      content: cleanContent,
-      toolCalls: normalizeCalls(toolCalls),
-      protocol: 'managed_xml',
-      rawMatches,
-      invalidToolNames,
-    })
+    const direct = run(content)
+    if (direct.toolCalls.length > 0) return direct
+
+    const normalized = normalizeSmartQuotes(content)
+    if (normalized !== content) {
+      const retried = run(normalized)
+      if (retried.toolCalls.length > 0) {
+        console.warn('[managedXml] 模型输出含中文全角引号，已在规范化后恢复工具调用')
+        return retried
+      }
+    }
+
+    return direct
   },
 
   formatAssistantToolCalls(calls) {
@@ -211,8 +282,23 @@ Tool results will be provided back to you as a tool result block.`
   },
 
   formatToolResult(result) {
-    return `<tool_result tool_call_id="${escapeXmlAttribute(result.toolCallId)}">${escapeXmlText(result.content)}</tool_result>`
+    return `<tool_result tool_call_id="${escapeXmlAttribute(result.toolCallId)}">${escapeXmlText(decorateToolResult(result.content))}</tool_result>`
   },
+}
+
+/**
+ * 清除模型自造的 tool_result 块。
+ *
+ * 触发场景（实测 11-05 12:18）：GLM 把 prompt 里的转录结构（`User: … Assistant: …`）
+ * 当成要继续写的内容，回复里冒出
+ * `User: <tool_result tool_call_id="call_0">Command: …</tool_result>`，
+ * 用户看到的是内部格式泄漏。工具调用走的是 `<tool_calls><invoke>`，与 `<tool_result>`
+ * 互不影响，因此这里可以放心整体剥离。
+ */
+function stripHallucinatedToolResults(text: string): string {
+  return text
+    .replace(/<\|CHAT2API\|tool_result[\s\S]*?<\/\|CHAT2API\|tool_result>/g, '')
+    .replace(/<tool_result\b[\s\S]*?<\/tool_result>/g, '')
 }
 
 /** 将文本安全地嵌入 XML 元素体（转义 < > &，避免破坏结构）。 */
@@ -231,6 +317,7 @@ interface ParseBlockOptions {
   invalidToolNames: string[]
   allowedNames: Set<string>
   toolCalls: ReturnType<typeof buildToolCall>[]
+  schemaMap: Map<string, Record<string, unknown>>
 }
 
 function parseBlocks(content: string, options: ParseBlockOptions): void {
@@ -252,16 +339,48 @@ function parseBlocks(content: string, options: ParseBlockOptions): void {
       }
 
       const args: Record<string, unknown> = {}
+      const schema = options.schemaMap.get(name)
+
       let parameterMatch: RegExpExecArray | null
       options.parameterPattern.lastIndex = 0
       while ((parameterMatch = options.parameterPattern.exec(invokeMatch[2])) !== null) {
         addParameter(args, parameterMatch[1].trim(), parseJsonValue(parameterMatch[2]))
       }
+      // 再补「裸标签」参数：GLM-5.3 常写 <command>x</command> 而不是
+      // <parameter name="command">x</parameter>。原先只认后者，参数整批丢失，
+      // 再被必填补齐成空串 —— 表现为「工具调用了，但参数是空的」。
+      // 放在 <parameter> 之后，已有值的键不会被覆盖成数组。
+      if (schema) extractSchemaTagParams(invokeMatch[2], schema, name, args)
+      remapPlaceholderParams(args, schema, name)
 
       options.toolCalls.push(
         buildToolCall(`call_${options.toolCalls.length}`, options.toolCalls.length, name, JSON.stringify(args), invokeMatch[0]),
       )
     }
+  }
+}
+
+/**
+ * 从 invoke 体内按 schema 提取「裸标签」参数。
+ *
+ * 实测 GLM-5.3 会写成 `<invoke name="Skill"><command>pptx</command></invoke>`，
+ * 完全没有 `<parameter name=...>` 包裹。这里只认 schema 里声明过的属性名，
+ * 因此不会把正文误判成参数。
+ */
+function extractSchemaTagParams(
+  body: string,
+  schema: Record<string, unknown>,
+  toolName: string,
+  args: Record<string, unknown>,
+): void {
+  const props = (schema.properties ?? {}) as Record<string, unknown>
+  for (const prop of Object.keys(props)) {
+    if (args[prop] !== undefined) continue
+    const re = new RegExp(`<${escapeRegExp(prop)}\\b[^>]*>([\\s\\S]*?)</${escapeRegExp(prop)}>`, 'i')
+    const match = re.exec(body)
+    if (!match) continue
+    addParameter(args, prop, parseJsonValue(match[1] ?? ''))
+    console.log(`[managedXml] ${toolName}: 从裸标签恢复参数 '${prop}'`)
   }
 }
 
@@ -410,6 +529,7 @@ function tryExtractPartialToolCalls(
   rawMatches: string[],
   invalidToolNames: string[],
   toolCalls: ReturnType<typeof buildToolCall>[],
+  schemaMap: Map<string, Record<string, unknown>>,
 ): void {
   // 内容里必须真的有工具调用起始标记（<|CHAT2API|tool_calls> 或 <|CHAT2API|invoke>）
   if (!/<\|CHAT2API\|(?:tool_calls>|invoke\s)/.test(content)) return
@@ -436,14 +556,19 @@ function tryExtractPartialToolCalls(
       addParameter(args, pm[1]!.trim(), parseJsonValue(pm[2]!))
     }
 
-    // 至少一个完整参数才恢复调用；否则（纯文本误含标记）维持文本处理
-    if (Object.keys(args).length === 0) continue
-
     const resolved = resolveToolName(inv.name, allowedNames) ?? inv.name
     if (!allowedNames.has(resolved)) {
       if (!invalidToolNames.includes(inv.name)) invalidToolNames.push(inv.name)
       continue
     }
+    // 损坏块里参数也可能写成裸标签，补一轮 schema 驱动的恢复
+    const schema = schemaMap.get(resolved)
+    if (schema) extractSchemaTagParams(region, schema, resolved, args)
+    remapPlaceholderParams(args, schema, resolved)
+
+    // 至少一个参数才恢复调用；否则（纯文本误含标记）维持文本处理
+    if (Object.keys(args).length === 0) continue
+
     if (resolved !== inv.name) {
       console.log(`[managedXml] 工具名模糊纠正: '${inv.name}' → '${resolved}'`)
     }
