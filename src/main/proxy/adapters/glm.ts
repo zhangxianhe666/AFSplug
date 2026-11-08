@@ -117,6 +117,22 @@ function generateSign(): { timestamp: string; nonce: string; sign: string } {
   return { timestamp, nonce, sign }
 }
 
+/**
+ * 判定一个响应是否属于「鉴权失效」。
+ *
+ * 两种形态都遇到过：
+ *  - 网关直接回 HTTP 401（token 过期/被吊销）
+ *  - HTTP 200 + 业务错误码 401（GLM 大多数失败都是这种"200 + 业务码"形态）
+ * 流式响应的 data 是 stream，取不到 code/status，只看 HTTP 状态即可。
+ */
+function isAuthFailureResponse(result: any): boolean {
+  if (!result) return false
+  if (result.status === 401) return true
+  const body = result.data
+  if (!body || typeof body !== 'object') return false
+  return body.code === 401 || body.status === 401
+}
+
 export class GLMAdapter {
   private provider: Provider
   private account: Account
@@ -129,6 +145,36 @@ export class GLMAdapter {
   private getRefreshToken(): string {
     const credentials = this.account.credentials
     return credentials.refresh_token || credentials.token || ''
+  }
+
+  /**
+   * 清掉本地 access_token 缓存，让下一次 acquireToken() 真正拿 refresh_token 去换。
+   * 只删当前 refresh_token 对应的条目，不动其他账户的缓存。
+   */
+  private invalidateTokenCache(): void {
+    const refreshToken = this.getRefreshToken()
+    if (refreshToken && tokenCache.delete(refreshToken)) {
+      storeManager.addLog('info', '[GLM] 收到 401，已清除本地 token 缓存')
+    }
+  }
+
+  /**
+   * 带「鉴权失效重试一次」的请求执行器。
+   *
+   * 为什么需要：access_token 的有效期是本地假设的 1 小时（ACCESS_TOKEN_EXPIRES），
+   * 不是服务端返回的 expires_in。服务端提前失效时（网页端退出登录、异地登录被踢、
+   * 管理员踢下线），缓存里的 token 仍被视为有效，最长 1 小时内所有 GLM 请求
+   * 都会失败。这里看到 401 就清缓存 + 重试一次，把不可用窗口从「最长 1 小时」
+   * 压缩到「一次往返」。
+   *
+   * @param send 用给定 token 发请求。闭包里必须重新生成 X-Sign/X-Nonce，
+   *             否则重放同样的签名可能被服务端拒绝。
+   */
+  private async withTokenRetry<T>(send: (token: string) => Promise<T>): Promise<T> {
+    const first = await send(await this.acquireToken())
+    if (!isAuthFailureResponse(first)) return first
+    this.invalidateTokenCache()
+    return send(await this.acquireToken())
   }
 
   private async acquireToken(): Promise<string> {
@@ -245,21 +291,22 @@ export class GLMAdapter {
       contentType: mimeType,
     })
 
-    const token = await this.acquireToken()
-    const response = await axios.post(
-      `${GLM_API_BASE}/backend-api/assistant/file_upload`,
-      formData,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Referer: 'https://chatglm.cn/',
-          ...FAKE_HEADERS,
-          ...formData.getHeaders(),
-        },
-        maxBodyLength: FILE_MAX_SIZE,
-        timeout: 60000,
-        validateStatus: () => true,
-      }
+    const response = await this.withTokenRetry((token) =>
+      axios.post(
+        `${GLM_API_BASE}/backend-api/assistant/file_upload`,
+        formData,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Referer: 'https://chatglm.cn/',
+            ...FAKE_HEADERS,
+            ...formData.getHeaders(),
+          },
+          maxBodyLength: FILE_MAX_SIZE,
+          timeout: 60000,
+          validateStatus: () => true,
+        }
+      )
     )
 
     if (response.status !== 200 || !response.data?.result) {
@@ -538,9 +585,6 @@ export class GLMAdapter {
   }
 
   async chatCompletion(request: ChatCompletionRequest): Promise<{ response: AxiosResponse; conversationId: string }> {
-    const token = await this.acquireToken()
-    const sign = generateSign()
-
     // Clone messages to avoid modifying original request
     const messages = [...request.messages]
 
@@ -627,6 +671,15 @@ GLM STRICT RULES:
 
     const preparedMessages = this.messagesToPrompt(messages, refs, toolsPrompt, false)
 
+    // 每次请求留一行体量与注入来源：排查「模型说工具不可用」时，需要知道
+    // 上游到底收到了多少字符、以及是否被 legacy toolsPrompt 又插了一套格式。
+    storeManager.addLog(
+      'info',
+      `[GLM] 请求体量 promptChars=${JSON.stringify(preparedMessages).length} ` +
+        `tools=${request.tools?.length ?? 0} legacyToolPrompt=${toolsPrompt ? 'yes' : 'no'} ` +
+        `detectedInjected=${toolPromptExists}`,
+    )
+
     // 带图请求把最终 messages 打出来（截断）：模型"看不到图"时要能分辨是
     // 部件没送出去，还是送出去但格式不对
     if (refs.length > 0) {
@@ -677,45 +730,49 @@ GLM STRICT RULES:
     }
 
     console.log('[GLM] Sending chat request...')
-    
-    const response = await axios.post(
-      `${GLM_API_BASE}/backend-api/assistant/stream`,
-      {
-        assistant_id: assistantId,
-        conversation_id: '',
-        project_id: '',
-        chat_type: 'user_chat',
-        messages: preparedMessages,
-        meta_data: {
-          channel: '',
-          chat_mode: chatMode || undefined,
-          draft_id: '',
-          if_plus_model: true,
-          input_question_type: 'xxxx',
-          is_networking: isNetworking,
-          is_test: false,
-          platform: 'pc',
-          quote_log_id: '',
-          cogview: {
-            rm_label_watermark: false,
+
+    // 签名必须每次请求重算：401 后重试时沿用旧 X-Sign/X-Nonce 会被服务端拒掉
+    const response = await this.withTokenRetry((token) => {
+      const sign = generateSign()
+      return axios.post(
+        `${GLM_API_BASE}/backend-api/assistant/stream`,
+        {
+          assistant_id: assistantId,
+          conversation_id: '',
+          project_id: '',
+          chat_type: 'user_chat',
+          messages: preparedMessages,
+          meta_data: {
+            channel: '',
+            chat_mode: chatMode || undefined,
+            draft_id: '',
+            if_plus_model: true,
+            input_question_type: 'xxxx',
+            is_networking: isNetworking,
+            is_test: false,
+            platform: 'pc',
+            quote_log_id: '',
+            cogview: {
+              rm_label_watermark: false,
+            },
           },
         },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          ...FAKE_HEADERS,
-          'X-Device-Id': uuid(),
-          'X-Request-Id': uuid(),
-          'X-Sign': sign.sign,
-          'X-Timestamp': sign.timestamp,
-          'X-Nonce': sign.nonce,
-        },
-        timeout: 120000,
-        validateStatus: () => true,
-        responseType: 'stream',
-      }
-    )
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...FAKE_HEADERS,
+            'X-Device-Id': uuid(),
+            'X-Request-Id': uuid(),
+            'X-Sign': sign.sign,
+            'X-Timestamp': sign.timestamp,
+            'X-Nonce': sign.nonce,
+          },
+          timeout: 120000,
+          validateStatus: () => true,
+          responseType: 'stream',
+        }
+      )
+    })
 
     return { response, conversationId: '' }
   }
@@ -851,6 +908,28 @@ GLM STRICT RULES:
   }
 }
 
+/**
+ * 粗略估算 token 数。
+ *
+ * chatglm.cn 网页接口不返回 usage，旧代码把 usage 写死成 1/1/2，导致所有 GLM 请求
+ * 在统计里都只算 2 个 token，成本报表彻底失真。这里按字符估算，只求量级正确：
+ * CJK 约 1.5 字符/token，其余约 4 字符/token。
+ */
+function estimateTokens(text: string): number {
+  if (!text) return 0
+  let cjk = 0
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0
+    const isCjk =
+      (code >= 0x4e00 && code <= 0x9fff) ||
+      (code >= 0x3040 && code <= 0x30ff) ||
+      (code >= 0xac00 && code <= 0xd7af)
+    if (isCjk) cjk += 1
+  }
+  const rest = text.length - cjk
+  return Math.max(1, Math.ceil(cjk / 1.5 + rest / 4))
+}
+
 export class GLMStreamHandler {
   private conversationId: string = ''
   private model: string
@@ -858,16 +937,32 @@ export class GLMStreamHandler {
   private onEnd?: () => void
   private toolStreamParser?: ToolStreamParser
   private toolCallingPlan?: ToolCallingPlan
+  /** 本次请求的提示词原文，仅用于估算 prompt_tokens（上游不返回 usage）。 */
+  private promptText: string
 
-  constructor(model: string, onEnd?: () => void, initialConversationId?: string, toolCallingPlan?: ToolCallingPlan) {
+  constructor(
+    model: string,
+    onEnd?: () => void,
+    initialConversationId?: string,
+    toolCallingPlan?: ToolCallingPlan,
+    promptText: string = '',
+  ) {
     this.model = model
     this.created = Math.floor(Date.now() / 1000)
     this.onEnd = onEnd
     this.toolCallingPlan = toolCallingPlan
     this.toolStreamParser = toolCallingPlan?.shouldParseResponse ? new ToolStreamParser(toolCallingPlan) : undefined
+    this.promptText = promptText
     if (initialConversationId) {
       this.conversationId = initialConversationId
     }
+  }
+
+  /** 估算本轮的 usage（上游无 usage 字段时的兜底）。 */
+  private buildUsage(completionText: string): { prompt_tokens: number; completion_tokens: number; total_tokens: number } {
+    const prompt = estimateTokens(this.promptText)
+    const completion = estimateTokens(completionText)
+    return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion }
   }
 
   async handleStream(stream: any): Promise<PassThrough> {
@@ -1069,7 +1164,7 @@ export class GLMStreamHandler {
                     finish_reason: finishReason,
                   },
                 ],
-                usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+                usage: this.buildUsage(sentContent + sentReasoning),
                 created: this.created,
               })}\n\n`
             )
@@ -1267,7 +1362,7 @@ export class GLMStreamHandler {
                     finish_reason: effectiveToolCalls.length > 0 ? 'tool_calls' : 'stop',
                   },
                 ],
-                usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+                usage: this.buildUsage(fullText + fullReasoning),
                 created: Math.floor(Date.now() / 1000),
               })
             }
@@ -1291,7 +1386,7 @@ export class GLMStreamHandler {
               finish_reason: 'stop',
             },
           ],
-          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          usage: this.buildUsage(''),
           created: Math.floor(Date.now() / 1000),
         })
       })
