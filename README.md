@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.7.1-blue?style=flat-square&logo=github" alt="Release">
+  <img src="https://img.shields.io/badge/Release-v1.7.2-blue?style=flat-square&logo=github" alt="Release">
   <img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square" alt="License">
   <br>
   <a href="https://www.electronjs.org/"><img src="https://img.shields.io/badge/Electron-33+-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron"></a>
@@ -36,7 +36,16 @@
 - **多语言**：英文 / 简体中文
 - **现代化 UI**：暗色/亮色主题
 
-## 🆕 本分支新增（v1.7.1）
+## 🆕 本分支新增（v1.7.2）
+
+- **链接策略改为「剥 scheme」**：实测确认 GLM 的触发条件是字面量 `http(s)://`，而不是「这里有个链接」的语义——保留完整地址、换成 `<user_link>`、加不加抓取提示，一样会让它切到「网页助手」人格（`parsed=0`，整轮不产出任何工具调用）。v1.7.2 统一剥掉 `https://` 前缀、只留 `域名/路径`；只有在链接确实是任务本体时（覆盖率 ≥ 50% 且剩余文字 ≤ 60 字，或含「这篇 / 总结一下 / 帮我看看」等指示词）才包 `<user_link>` 并提示「抓取时补全 https://」，模型能正确补全，地址信息不丢
+- **上下文里的链接不再被当成任务**：agent 客户端注入的运行时上下文（`[System reminder]`、`runtime context`、工具/技能清单）里的链接一律只剥 scheme、**不追加**抓取指引。之前正是这条把模型引去抓客户端自己的 Web UI 地址，导致整轮工具调用崩掉
+- **本地 / 内网地址直接抹成 `[链接]`**：`localhost`、`127.0.0.1`、`::1`、`10.x`、`172.16-31.x`、`192.168.x`。agent 客户端注入的界面地址全是这一类，而真实用户贴的文章链接不会是内网地址，零误伤
+- **清单与 markdown 也一并处理**：4 条以上链接按参考清单处理（只剥 scheme，不加提示）；markdown 链接目标 `[文字](url)` 同样剥 scheme（v1.7.1 为「不破坏语法」整条跳过，恰好漏掉这种最常见的投毒形式）；代码围栏内仍保持原样，避免损坏命令与配置
+- **两个匹配 bug**：抓取工具名从精确 `=== 'WebFetch'` 改为归一化匹配（`WebFetch` / `web_fetch` / `fetch_url`，兼容 `default_api:` 命名空间前缀），此前 dsh 这类客户端永远判 false，提示退化成含糊的 an available fetch tool；`defuseSystemUrls` 补上 `content` 为 parts 数组的分支（v1.7.1 整条跳过）
+- **回归测试**：链接策略抽成独立模块 `toolCalling/linkPolicy.ts`，新增/改写 14 个用例覆盖内网地址、注入上下文、链接清单、markdown、代码围栏、多模态部件与系统消息 parts 数组
+
+## v1.7.1
 
 - **工具调用解析容错**：模型偶发用中文全角引号写 `<invoke name=“Bash”>`，严格正则匹配不到，整段 XML 不报错也不解析、当普通文本透传，界面表现是"模型没调用工具"；现在会自动规范化重试。同时支持裸标签参数（`<command>x</command>`）与 `argument1/arg1/args` 这类占位参数名
 - **失败不再被包装成成功**：客户端工具失败仍以 `status=completed` 回传，失败只在正文里，模型看到"有内容"就回"已完成 ✅"并给出不存在的路径。现在命中非零退出码、被信号杀死、Python/Node 崩溃，以及 **POSIX 与 Windows（cmd / PowerShell，中英文）** 的错误文案时，会前置 `[TOOL_ERROR]` 横幅并禁止宣称完成
@@ -100,8 +109,8 @@ npm run build:all    # 全平台
 打 `v*` 标签触发 GitHub Actions 五平台并行构建：
 
 ```bash
-git tag v1.7.1
-git push origin v1.7.1
+git tag v1.7.2
+git push origin v1.7.2
 ```
 
 > 注意：electron-builder 默认创建 Draft Release，发布后需手动执行
