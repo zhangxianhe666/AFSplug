@@ -16,6 +16,7 @@
 import { session } from 'electron'
 import { oauthManager } from './oauth/manager'
 import AccountManager from './store/accounts'
+import { storeManager } from './store/store'
 import type { Account, ProviderVendor } from '../shared/types'
 
 /** 固定会话分区 — cookie 跨应用重启保留 */
@@ -80,6 +81,52 @@ function saveOrCreate(
   })
   console.log(`[TokenRefresh:${providerType}] created account ${created.id}`)
   return { success: true, message: '登录成功，已自动创建账户', token: masked }
+}
+
+/** 解析 JWT 的 exp（秒）。非 JWT（如 GLM 的 refresh_token cookie）返回 null。 */
+export function jwtExpiry(token: string): number | null {
+  if (!token.startsWith('eyJ')) return null
+  const parts = token.split('.')
+  if (parts.length !== 3) return null
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'))
+    return typeof payload.exp === 'number' ? payload.exp : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 把捕获到的令牌写回账户，并校验它到底还能不能用。
+ *
+ * Kimi 的 kimi-auth cookie 里是一个 15 分钟寿命的 JWT。静默刷新如果抓到的是
+ * 上一轮遗留的旧 cookie，写回去看起来"成功"，但下一次请求仍然 401——线上表现
+ * 就是「刷新日志说成功，15 分钟后照样 Token invalid」。所以这里先看 exp，
+ * 已过期或不足 1 分钟的直接判失败，不去污染账户里的令牌。
+ */
+function acceptCaptured(
+  providerType: TokenRefreshProvider,
+  account: Account | undefined,
+  token: string,
+): TokenRefreshResult {
+  const exp = jwtExpiry(token)
+  const remain = exp === null ? null : exp - Math.floor(Date.now() / 1000)
+
+  if (remain !== null && remain <= 60) {
+    storeManager.addLog(
+      'warn',
+      `[TokenRefresh:${providerType}] 捕获到的令牌已过期（剩余 ${remain}s），不写回账户`,
+    )
+    return { success: false, message: `捕获到的令牌已过期（剩余 ${remain}s）` }
+  }
+
+  const result = saveOrCreate(providerType, account, token)
+  storeManager.addLog(
+    'info',
+    `[TokenRefresh:${providerType}] ${result.message}` +
+      (remain === null ? '（非 JWT，未校验有效期）' : `，令牌剩余 ${Math.floor(remain / 60)} 分钟`),
+  )
+  return result
 }
 
 /** 通过内置浏览器捕获令牌（Kimi: Authorization 头；GLM: cookie store） */
@@ -170,7 +217,7 @@ export async function refreshProviderToken(
     if (!token) {
       return { success: false, message: '登录超时或未捕获到令牌，请重试' }
     }
-    return saveOrCreate(providerType, account, token)
+    return acceptCaptured(providerType, account, token)
   }
 
   // 已有账户：先静默尝试（复用持久会话）
@@ -178,13 +225,18 @@ export async function refreshProviderToken(
     const silentTimeout = providerType === 'glm' ? GLM_SILENT_TIMEOUT : SILENT_TIMEOUT
     const token = await captureToken(providerType, false, silentTimeout)
     if (token) {
-      return saveOrCreate(providerType, account, token)
+      return acceptCaptured(providerType, account, token)
     }
     // 定时任务模式：不弹窗
     if (silent) {
+      storeManager.addLog(
+        'warn',
+        `[TokenRefresh:${providerType}] 静默刷新失败（会话未登录或服务不可达），令牌不会更新`,
+      )
       return { success: false, message: '静默刷新失败（会话未登录或服务不可达）' }
     }
   } else if (silent) {
+    storeManager.addLog('warn', `[TokenRefresh:${providerType}] 未找到账户，静默刷新跳过`)
     // 定时任务且无账户：不弹窗，等用户手动点卡片
     return { success: false, message: `未找到 ${providerType === 'glm' ? 'GLM' : 'Kimi'} 账户，请先点卡片登录` }
   }
@@ -194,7 +246,7 @@ export async function refreshProviderToken(
   if (!loginToken) {
     return { success: false, message: '未捕获到令牌，请确认已在窗口中完成登录' }
   }
-  return saveOrCreate(providerType, account, loginToken)
+  return acceptCaptured(providerType, account, loginToken)
 }
 
 /** Kimi (K3) 便捷入口 */

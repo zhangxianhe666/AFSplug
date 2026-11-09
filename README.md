@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.7.2-blue?style=flat-square&logo=github" alt="Release">
+  <img src="https://img.shields.io/badge/Release-v1.7.3-blue?style=flat-square&logo=github" alt="Release">
   <img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square" alt="License">
   <br>
   <a href="https://www.electronjs.org/"><img src="https://img.shields.io/badge/Electron-33+-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron"></a>
@@ -36,7 +36,16 @@
 - **多语言**：英文 / 简体中文
 - **现代化 UI**：暗色/亮色主题
 
-## 🆕 本分支新增（v1.7.2）
+## 🆕 本分支新增（v1.7.3）
+
+- **沙箱幻觉兜底**：GLM / Kimi 网页版在服务端各挂了一个原生工具（GLM 的 `open_url` 与代码解释器、Kimi 的智能体沙箱）。当它切到沙箱执行时，会把沙箱目录当成用户机器报出来——GLM 报 `/mnt/data`、Kimi 报 `/mnt/agents`，整轮 `parsed=0`。现在命中沙箱痕迹就整轮作废重开（1/8 的失败率压到 1/64 量级）
+- **「有工具却说没工具」兜底**：注入了 30 个工具，模型却回「我没有获取实时天气数据的工具，你可以自己搜」——这类回答不交给客户端，重开一轮
+- **「只说不做」兜底**：模型把行动计划当最终回答交出来（「让我尝试用 python-docx……首先检查当前目录」），一个 tool_call 都没发就结束回合，用户必须再敲一句「继续」。现在这种「零工具调用 + 结尾停在过渡句」的回合会被识别并重开
+- **重试带纠偏**：以前重试是把同样的 messages 再发一遍，相同输入大概率同样输出；现在追加一条纠偏消息，明确告诉它上一轮错在哪、本轮只允许输出调用块（按协议自动选 `[function_calls]` 或 `<tool_call>`）
+- **工具黑名单 + 认证失败自愈**：可通过 `~/.chat2api/tool-policy.json` 的 `disabledTools`（或 `AFS_DISABLED_TOOLS`）屏蔽指定工具，只过滤注入给模型的清单、不动客户端 tools；同时扫描历史工具结果，命中 401 / `invalid api key` / `token expired` 等鉴权失败就自动摘掉那个工具，避免每轮都撞同一个坏 key
+- **Kimi 令牌捕获不再「假成功」**：捕获到的 JWT 会校验 `exp`，过期或剩余不足 1 分钟判失败不写回缓存；自动刷新的成功/失败都写应用日志（含剩余分钟），不再只留在 console 里看不见
+
+## v1.7.2
 
 - **链接策略改为「剥 scheme」**：实测确认 GLM 的触发条件是字面量 `http(s)://`，而不是「这里有个链接」的语义——保留完整地址、换成 `<user_link>`、加不加抓取提示，一样会让它切到「网页助手」人格（`parsed=0`，整轮不产出任何工具调用）。v1.7.2 统一剥掉 `https://` 前缀、只留 `域名/路径`；只有在链接确实是任务本体时（覆盖率 ≥ 50% 且剩余文字 ≤ 60 字，或含「这篇 / 总结一下 / 帮我看看」等指示词）才包 `<user_link>` 并提示「抓取时补全 https://」，模型能正确补全，地址信息不丢
 - **上下文里的链接不再被当成任务**：agent 客户端注入的运行时上下文（`[System reminder]`、`runtime context`、工具/技能清单）里的链接一律只剥 scheme、**不追加**抓取指引。之前正是这条把模型引去抓客户端自己的 Web UI 地址，导致整轮工具调用崩掉
@@ -109,8 +118,8 @@ npm run build:all    # 全平台
 打 `v*` 标签触发 GitHub Actions 五平台并行构建：
 
 ```bash
-git tag v1.7.2
-git push origin v1.7.2
+git tag v1.7.3
+git push origin v1.7.3
 ```
 
 > 注意：electron-builder 默认创建 Draft Release，发布后需手动执行

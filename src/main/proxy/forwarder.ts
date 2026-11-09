@@ -22,6 +22,18 @@ import { MiniMaxAdapter, MiniMaxStreamHandler } from './adapters/minimax'
 import { PerplexityAdapter } from './adapters/perplexity'
 import { PerplexityStreamHandler } from './adapters/perplexity-stream'
 import { ToolCallingEngine } from './toolCalling/ToolCallingEngine'
+import {
+  detectPlanOnlyTurn,
+  detectSandboxHallucination,
+  detectToolRefusal,
+  isPlanOnlyRetryEnabled,
+  isSandboxRetryEnabled,
+  isToolRefusalRetryEnabled,
+  lastUserText,
+  planOnlyNudge,
+  sandboxNudge,
+  toolRefusalNudge,
+} from './toolCalling/hallucinationGuard'
 import type { ToolCallingTransformResult } from './toolCalling/types'
 import { sessionManager } from './sessionManager'
 import {
@@ -571,6 +583,10 @@ export class RequestForwarder {
 
   /**
    * GLM Dedicated Forward
+   *
+   * v1.7.3 起带「沙箱幻觉」兜底：chatglm 网页版可能给某一轮挂上代码解释器，模型
+   * 于是把 /mnt/data 这类沙箱目录当成用户工作区报出来。这一轮的标志是「一个工具
+   * 调用都没有 + 正文命中沙箱痕迹」，作废后重开一次。
    */
   private async forwardGLM(
     request: ChatCompletionRequest,
@@ -580,79 +596,122 @@ export class RequestForwarder {
     startTime: number
   ): Promise<ForwardResult> {
     try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      const transformedRequest = {
-        ...request,
-        messages: transformed.messages,
-        tools: transformed.tools,
-      }
-
+      const maxAttempts = isSandboxRetryEnabled() ? 2 : 1
       const adapter = new GLMAdapter(provider, account)
-      const { response, conversationId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformedRequest.messages,
-        stream: transformedRequest.stream,
-        temperature: transformedRequest.temperature,
-        web_search: transformedRequest.web_search,
-        reasoning_effort: transformedRequest.reasoning_effort,
-        deep_research: transformedRequest.deep_research,
-      })
+      let lastResponse: any = null
+      let result: any = null
+      let handler: GLMStreamHandler | null = null
+      let sandboxHint: string | null = null
 
-      const latency = Date.now() - startTime
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const transformed = this.transformRequestForPromptToolUse(request, provider)
+        const transformedRequest = {
+          ...request,
+          messages: sandboxHint
+            ? [...transformed.messages, { role: 'user' as const, content: sandboxHint }]
+            : transformed.messages,
+          tools: transformed.tools,
+        }
 
-      if (response.status >= 400) {
-        let errorMessage = `HTTP ${response.status}`
-        if (response.data) {
-          if (typeof response.data === 'string') {
-            errorMessage = response.data
-          } else if (response.data.msg) {
-            errorMessage = response.data.msg
-          } else if (response.data.message) {
-            errorMessage = response.data.message
-          } else if (response.data.error?.message) {
-            errorMessage = response.data.error.message
+        const { response } = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.model,
+          messages: transformedRequest.messages,
+          stream: transformedRequest.stream,
+          temperature: transformedRequest.temperature,
+          web_search: transformedRequest.web_search,
+          reasoning_effort: transformedRequest.reasoning_effort,
+          deep_research: transformedRequest.deep_research,
+        })
+
+        if (response.status >= 400) {
+          let errorMessage = `HTTP ${response.status}`
+          if (response.data) {
+            if (typeof response.data === 'string') {
+              errorMessage = response.data
+            } else if (response.data.msg) {
+              errorMessage = response.data.msg
+            } else if (response.data.message) {
+              errorMessage = response.data.message
+            } else if (response.data.error?.message) {
+              errorMessage = response.data.error.message
+            }
+          }
+          return {
+            success: false,
+            status: response.status,
+            error: errorMessage,
+            latency: Date.now() - startTime,
           }
         }
-        return {
-          success: false,
-          status: response.status,
-          error: errorMessage,
-          latency,
-        }
-      }
 
-      // 上游（chatglm.cn）不返回 usage，把提示词原文交给 handler 以便估算 prompt_tokens，
-      // 否则所有 GLM 请求在统计里都算 2 个 token。
-      const handler = new GLMStreamHandler(
-        actualModel,
-        undefined,
-        undefined,
-        transformed.plan,
-        buildPromptText(transformed.messages, transformed.tools),
-      )
-      
-      if (request.stream) {
+        // 上游（chatglm.cn）不返回 usage，把提示词原文交给 handler 以便估算 prompt_tokens，
+        // 否则所有 GLM 请求在统计里都算 2 个 token。
+        const attemptHandler = new GLMStreamHandler(
+          actualModel,
+          undefined,
+          undefined,
+          transformed.plan,
+          buildPromptText(transformed.messages, transformed.tools),
+        )
+
         // GLM web 流式输出的是增量 part，会把文本 XML 拆碎导致实时解析失败。
         // 统一收集完整响应（非流式路径在 finish 事件拿到完整 part），解析后再转 SSE。
-        const result = await handler.handleNonStream(response.data)
+        const attemptResult = await attemptHandler.handleNonStream(response.data)
 
-        this.applyToolCallsToResponse(result, transformed)
+        this.applyToolCallsToResponse(attemptResult, transformed)
 
-        // If delete session after chat is enabled, we need to handle it after stream ends
-        if (shouldDeleteSession()) {
-          const convId = handler.getConversationId()
-          if (convId) {
-            await adapter.deleteConversation(convId)
-          }
+        const verdict = detectSandboxHallucination(
+          attemptResult,
+          transformed.plan,
+          lastUserText(transformed.messages),
+        )
+
+        const convId = shouldDeleteSession() ? attemptHandler.getConversationId() : null
+        if (convId) {
+          await adapter.deleteConversation(convId)
         }
 
+        if (verdict.retry) {
+          if (attempt < maxAttempts) {
+            storeManager.addLog(
+              'warn',
+              `[ToolCalling] 命中沙箱幻觉（${verdict.matched.join('/')}），第 ${attempt} 轮作废，重开一轮（带纠偏提示）`,
+            )
+            sandboxHint = sandboxNudge(transformed.plan.protocol)
+            continue
+          }
+          storeManager.addLog(
+            'warn',
+            `[ToolCalling] 第 ${attempt} 轮仍是沙箱幻觉（${verdict.matched.join('/')}），重试已用尽`,
+          )
+        }
+
+        lastResponse = response
+        result = attemptResult
+        handler = attemptHandler
+        break
+      }
+
+      if (!result || !handler) {
+        return {
+          success: false,
+          error: 'GLM 未返回可用结果',
+          latency: Date.now() - startTime,
+        }
+      }
+
+      const latency = Date.now() - startTime
+      const headers = lastResponse ? this.extractHeaders(lastResponse.headers) : {}
+      const status = lastResponse?.status ?? 200
+
+      if (request.stream) {
         const sseStream = resultToSSE(result)
 
         return {
           success: true,
-          status: response.status,
-          headers: this.extractHeaders(response.headers),
+          status,
+          headers,
           stream: sseStream,
           skipTransform: true,
           latency,
@@ -660,21 +719,10 @@ export class RequestForwarder {
         }
       }
 
-      const result = await handler.handleNonStream(response.data)
-      
-      this.applyToolCallsToResponse(result, transformed)
-      
-      if (shouldDeleteSession()) {
-        const convId = handler.getConversationId()
-        if (convId) {
-          await adapter.deleteConversation(convId)
-        }
-      }
-
       return {
         success: true,
-        status: response.status,
-        headers: this.extractHeaders(response.headers),
+        status,
+        headers,
         body: result,
         latency,
         providerSessionId: handler.getConversationId() ?? undefined,
@@ -698,79 +746,200 @@ export class RequestForwarder {
   ): Promise<ForwardResult> {
     try {
       const transformed = this.transformRequestForPromptToolUse(request, provider)
-      
-      const adapter = new KimiAdapter(provider, account)
-      const { response, conversationId } = await adapter.chatCompletion({
-        model: actualModel,
-        originalModel: request.model,
-        messages: transformed.messages,
-        stream: request.stream,
-        temperature: request.temperature,
-        enableThinking: !!request.reasoning_effort,
-        enableWebSearch: !!request.web_search,
-        reasoning_effort: request.reasoning_effort || undefined,
-      })
 
-      const latency = Date.now() - startTime
+      // Kimi 网页版偶发「有工具却宣称没工具」：注入了 30 个工具，却回一句「我没有
+      // 获取实时天气数据的工具」，再建议用户自己去搜。这类回答只能整轮作废，而流式
+      // 一旦吐字就收不回来——所以托管模式下先收完整轮、判定后再决定输出（非托管
+      // 请求保持原来的直通流式，不加延迟）。
+      const managed = transformed.plan.mode === 'managed' && transformed.plan.shouldParseResponse
+      const maxAttempts = managed && (isToolRefusalRetryEnabled() || isPlanOnlyRetryEnabled()) ? 2 : 1
+      const latencyBase = startTime
 
-      if (response.status >= 400) {
-        let errorMessage = `HTTP ${response.status}`
-        return {
-          success: false,
-          status: response.status,
-          error: errorMessage,
-          latency,
-        }
-      }
+      if (!managed) {
+        const adapter = new KimiAdapter(provider, account)
+        const { response, conversationId } = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.model,
+          messages: transformed.messages,
+          stream: request.stream,
+          temperature: request.temperature,
+          enableThinking: !!request.reasoning_effort,
+          enableWebSearch: !!request.web_search,
+          reasoning_effort: request.reasoning_effort || undefined,
+        })
 
-      const handler = new KimiStreamHandler(actualModel, conversationId, !!request.reasoning_effort, transformed.plan)
-      
-      if (request.stream) {
-        const transformedStream = await handler.handleStream(response.data)
-        
-        // Add delete conversation callback if needed
-        if (shouldDeleteSession()) {
-          const originalEnd = transformedStream.end.bind(transformedStream)
-          transformedStream.end = function(chunk?: any, encoding?: any, callback?: any) {
-            const realChatId = handler.getConversationId()
-            if (realChatId) {
-              adapter.deleteConversation(realChatId).catch(err => {
-                console.error('[Kimi] Failed to delete conversation:', err)
-              })
-            }
-            return originalEnd(chunk, encoding, callback)
+        const latency = Date.now() - latencyBase
+
+        if (response.status >= 400) {
+          return {
+            success: false,
+            status: response.status,
+            error: `HTTP ${response.status}`,
+            latency,
           }
         }
-        
+
+        const handler = new KimiStreamHandler(actualModel, conversationId, !!request.reasoning_effort, transformed.plan)
+
+        if (request.stream) {
+          const transformedStream = await handler.handleStream(response.data)
+
+          // Add delete conversation callback if needed
+          if (shouldDeleteSession()) {
+            const originalEnd = transformedStream.end.bind(transformedStream)
+            transformedStream.end = function(chunk?: any, encoding?: any, callback?: any) {
+              const realChatId = handler.getConversationId()
+              if (realChatId) {
+                adapter.deleteConversation(realChatId).catch(err => {
+                  console.error('[Kimi] Failed to delete conversation:', err)
+                })
+              }
+              return originalEnd(chunk, encoding, callback)
+            }
+          }
+
+          return {
+            success: true,
+            status: response.status,
+            headers: this.extractHeaders(response.headers),
+            stream: transformedStream,
+            skipTransform: true,
+            latency,
+            providerSessionId: undefined,
+          }
+        }
+
+        const result = await handler.handleNonStream(response.data)
+        this.applyToolCallsToResponse(result, transformed)
+
+        if (shouldDeleteSession()) {
+          const realChatId = handler.getConversationId()
+          if (realChatId) {
+            await adapter.deleteConversation(realChatId)
+          }
+        }
+
         return {
           success: true,
           status: response.status,
           headers: this.extractHeaders(response.headers),
-          stream: transformedStream,
+          body: result,
+          latency,
+          providerSessionId: handler.getConversationId() ?? undefined,
+        }
+      }
+
+      // ── 托管模式：收完整轮 → 判定 → 必要时重开 ──────────────────────────
+      let finalResult: any = null
+      let finalHandler: KimiStreamHandler | null = null
+      let finalResponse: any = null
+      // 重试时用纠偏消息替换「裸重发」：同样的 messages 重发一遍，模型大概率再犯同样的错。
+      let nudge: string | null = null
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const adapter = new KimiAdapter(provider, account)
+        const attemptMessages = nudge
+          ? [...transformed.messages, { role: 'user' as const, content: nudge }]
+          : transformed.messages
+        const { response, conversationId } = await adapter.chatCompletion({
+          model: actualModel,
+          originalModel: request.model,
+          messages: attemptMessages,
+          stream: true,
+          temperature: request.temperature,
+          enableThinking: !!request.reasoning_effort,
+          enableWebSearch: !!request.web_search,
+          reasoning_effort: request.reasoning_effort || undefined,
+        })
+
+        if (response.status >= 400) {
+          return {
+            success: false,
+            status: response.status,
+            error: `HTTP ${response.status}`,
+            latency: Date.now() - latencyBase,
+          }
+        }
+
+        const handler = new KimiStreamHandler(actualModel, conversationId, !!request.reasoning_effort, transformed.plan)
+        const result = await handler.handleNonStream(response.data)
+        this.applyToolCallsToResponse(result, transformed)
+
+        const userText = lastUserText(transformed.messages)
+        const refusal = detectToolRefusal(result, transformed.plan, userText)
+        const planOnly = refusal.retry ? refusal : detectPlanOnlyTurn(result, transformed.plan, userText)
+        const failure = planOnly.retry ? planOnly : null
+        const reasonText =
+          failure?.reason === 'plan_only'
+            ? `只说了计划没动手（${failure.matched.join('/')}）`
+            : `宣称没有可用工具（${failure?.matched.join('/') ?? ''}）`
+        const convId = handler.getConversationId()
+
+        if (failure && attempt < maxAttempts) {
+          storeManager.addLog(
+            'warn',
+            `[ToolCalling] Kimi 本轮${reasonText}，第 ${attempt} 轮作废，重开一轮（带纠偏提示）`,
+          )
+          nudge =
+            failure.reason === 'plan_only'
+              ? planOnlyNudge(transformed.plan.protocol)
+              : toolRefusalNudge(transformed.plan.protocol)
+          if (shouldDeleteSession() && convId) {
+            await adapter.deleteConversation(convId).catch(() => {})
+          }
+          continue
+        }
+
+        if (failure) {
+          storeManager.addLog(
+            'warn',
+            `[ToolCalling] Kimi 第 ${attempt} 轮仍${reasonText}，重试已用尽`,
+          )
+        }
+
+        finalResult = result
+        finalHandler = handler
+        finalResponse = response
+        break
+      }
+
+      if (!finalResult || !finalHandler || !finalResponse) {
+        return {
+          success: false,
+          error: 'Kimi 未返回可用结果',
+          latency: Date.now() - latencyBase,
+        }
+      }
+
+      const latency = Date.now() - latencyBase
+      const headers = this.extractHeaders(finalResponse.headers)
+
+      if (shouldDeleteSession()) {
+        const realChatId = finalHandler.getConversationId()
+        if (realChatId) {
+          await new KimiAdapter(provider, account).deleteConversation(realChatId).catch(() => {})
+        }
+      }
+
+      if (request.stream) {
+        return {
+          success: true,
+          status: finalResponse.status,
+          headers,
+          stream: resultToSSE(finalResult),
           skipTransform: true,
           latency,
           providerSessionId: undefined,
         }
       }
 
-      const result = await handler.handleNonStream(response.data)
-
-      this.applyToolCallsToResponse(result, transformed)
-
-      if (shouldDeleteSession()) {
-        const realChatId = handler.getConversationId()
-        if (realChatId) {
-          await adapter.deleteConversation(realChatId)
-        }
-      }
-
       return {
         success: true,
-        status: response.status,
-        headers: this.extractHeaders(response.headers),
-        body: result,
+        status: finalResponse.status,
+        headers,
+        body: finalResult,
         latency,
-        providerSessionId: handler.getConversationId() ?? undefined,
+        providerSessionId: finalHandler.getConversationId() ?? undefined,
       }
     } catch (error) {
       const latency = Date.now() - startTime

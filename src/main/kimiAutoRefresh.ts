@@ -44,8 +44,15 @@ function scheduleNext(delayMs: number): void {
       failures = result.success ? 0 : failures + 1
       if (result.success) {
         console.log('[KimiAutoRefresh] 定时刷新成功')
+        storeManager.addLog('info', `[KimiAutoRefresh] 定时刷新成功：${result.message}`)
       } else {
         console.log(`[KimiAutoRefresh] 定时刷新跳过（${failures}）: ${result.message}`)
+        // 静默刷新失败以前只打在 stdout 里，打包后的 GUI 进程看不到，用户只能
+        // 在 15 分钟后撞上 401。落一条到应用日志，至少「保活断了」是可观测的。
+        storeManager.addLog(
+          'warn',
+          `[KimiAutoRefresh] 定时刷新失败（连续 ${failures} 次）：${result.message}`,
+        )
       }
     } catch (error: any) {
       failures++

@@ -8,7 +8,9 @@ import {
 import { getToolProtocol } from './protocols/index.ts'
 import { getToolClientAdapter } from './clientAdapters/index.ts'
 import { defuseSystemUrls, rewriteUserUrls } from './linkPolicy.ts'
+import { detectAuthFailedTools, partitionDisabledTools, resolveToolPolicy } from './toolPolicy.ts'
 import { buildToolCallingRuntimePlan } from './runtimePlan.ts'
+import type { NormalizedClientToolRequest } from './clientAdapters/types.ts'
 import type { NormalizedToolDefinition, ToolCallingPlan, ToolCallingTransformResult, ToolProtocolId } from './types.ts'
 
 export class ToolCallingEngine {
@@ -36,7 +38,7 @@ export class ToolCallingEngine {
   }): ToolCallingTransformResult {
     const { request, provider, actualModel, requestId } = input
     const adapter = getToolClientAdapter(this.config.clientAdapterId)
-    const clientRequest = adapter.normalizeRequest(request)
+    const clientRequest = this.applyToolPolicy(adapter.normalizeRequest(request), request.messages)
     const plan = buildToolCallingRuntimePlan({
       requestId,
       providerId: provider.id,
@@ -94,6 +96,39 @@ export class ToolCallingEngine {
       tools: undefined,
       plan,
     }
+  }
+
+  /**
+   * 把「注定失败的工具」从注入清单里摘掉（策略见 toolPolicy.ts 顶部注释）。
+   *
+   * 只改注入给模型的清单，客户端自己的 tools 数组原样保留——执行器还在客户端那边，
+   * 我们无权也无需改动。摘掉 web_search 之后，模型手里剩 web_fetch（纯 HTTP，不依赖
+   * 任何 key），「今日重庆天气」这类实时问题能自己走通。
+   */
+  private applyToolPolicy(
+    clientRequest: NormalizedClientToolRequest,
+    messages: ChatMessage[],
+  ): NormalizedClientToolRequest {
+    if (clientRequest.tools.length === 0) return clientRequest
+    // 客户端点名要某个工具时不干预：过滤掉会直接触发 "Forced tool is not declared"，
+    // 把客户端的显式意图变成网关报错，比不屏蔽更糟。
+    if (clientRequest.toolChoice.mode === 'forced') return clientRequest
+
+    const configured = resolveToolPolicy()
+    const authFailed = detectAuthFailedTools(messages)
+    const disabled = new Set<string>([...configured.disabledTools, ...authFailed])
+    if (disabled.size === 0) return clientRequest
+
+    const { kept, removed } = partitionDisabledTools(clientRequest.tools, disabled)
+    if (removed.length === 0) return clientRequest
+
+    const detail = removed
+      .map((name) => `${name}${authFailed.has(name) ? '(工具返回认证失败)' : '(配置屏蔽)'}`)
+      .join('、')
+    this.log(
+      `[ToolCalling] 已屏蔽工具 ${detail}，本轮注入 ${kept.length}/${clientRequest.tools.length} 个工具`,
+    )
+    return { ...clientRequest, tools: kept }
   }
 
   applyNonStreamResponse(result: any, plan: ToolCallingPlan): void {
