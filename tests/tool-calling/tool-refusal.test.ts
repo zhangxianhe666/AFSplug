@@ -215,11 +215,12 @@ test('nudge: plan-only 在 xml 协议下换成 xml 示例', async () => {
   assert.ok(!text.includes('[function_calls]'))
 })
 
-test('nudge: 工具否决提示明确它其实有工具', async () => {
+test('nudge: 工具否决提示点名它其实有联网能力', async () => {
   const { toolRefusalNudge } = await import('../../src/main/proxy/toolCalling/hallucinationGuard.ts')
   const text = toolRefusalNudge('managed_bracket')
-  assert.ok(text.includes('这是错的'))
   assert.ok(text.includes('web_fetch'))
+  assert.ok(text.includes('没有「联网」开关'))
+  assert.ok(text.includes('wttr.in'))
 })
 
 test('nudge: 沙箱提示点名 /mnt 路径不许出现', async () => {
@@ -227,4 +228,69 @@ test('nudge: 沙箱提示点名 /mnt 路径不许出现', async () => {
   const text = sandboxNudge('managed_bracket')
   assert.ok(text.includes('/mnt/data'))
   assert.ok(text.includes('不要输出 /mnt'))
+})
+
+// ── Kimi「没开联网」话术（v1.7.3 补丁 2）──────────────────────────────────
+
+test('refusal: Kimi 说「网络搜索功能已被禁用，点击联网按钮」判为需要重试', () => {
+  const verdict = detectToolRefusal(
+    reply('我需要联网查询今日北京天气。当前网络搜索功能已被禁用，您可以在输入框中点击"联网"按钮重新启用后，我就能为您查询了。'),
+    plan(),
+    '今日北京天气如何',
+  )
+
+  assert.equal(verdict.retry, true)
+  assert.equal(verdict.reason, 'tool_refusal')
+  assert.ok(verdict.matched.includes('search_disabled'))
+  assert.ok(verdict.matched.includes('enable_online_button'))
+})
+
+test('refusal: Kimi 说「web_fetch 需要您提供具体 URL，我无法主动搜索」也要重试', () => {
+  const verdict = detectToolRefusal(
+    reply('我无法查询天气信息，因为当前可用的工具（如 `web_fetch`）需要您提供具体的 URL，而我无法主动搜索网络来获取天气数据。'),
+    plan(),
+    '今日北京天气如何',
+  )
+
+  assert.equal(verdict.retry, true)
+  assert.equal(verdict.reason, 'tool_refusal')
+})
+
+test('refusal: 全角引号与「开启联网功能」变体同样命中', () => {
+  const verdict = detectToolRefusal(
+    reply('联网搜索功能已经关闭，请先在输入框开启联网功能后再试。'),
+    plan(),
+    '今天上海天气',
+  )
+  assert.equal(verdict.retry, true)
+})
+
+test('refusal: 正常给出结论（没有拒绝话术）不重试', () => {
+  const verdict = detectToolRefusal(
+    reply('北京今天晴，气温 5℃，西北风 6km/h，湿度 58%。'),
+    plan(),
+    '今日北京天气如何',
+  )
+  assert.equal(verdict.retry, false)
+  assert.equal(verdict.reason, 'clean')
+})
+
+test('refusal: 非实时问题里的「无法搜索」不触发重试', () => {
+  const verdict = detectToolRefusal(
+    reply('这个仓库里没有搜索功能，所以我无法搜索历史记录。'),
+    plan(),
+    '这个项目支持哪些搜索方式',
+  )
+  assert.equal(verdict.retry, false)
+  assert.equal(verdict.reason, 'not_live_question')
+})
+
+test('refusal: 本轮没有能取信息的工具时不重试（省 token）', () => {
+  const verdict = detectToolRefusal(
+    reply('网络搜索功能已被禁用，请点击联网按钮。'),
+    plan({ tools: [{ name: 'present_files', parameters: { type: 'object' }, source: 'openai' }] } as any),
+    '今日北京天气如何',
+  )
+  assert.equal(verdict.retry, false)
+  assert.equal(verdict.reason, 'no_informative_tool')
 })

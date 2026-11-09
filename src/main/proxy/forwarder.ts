@@ -872,7 +872,7 @@ export class RequestForwarder {
         const reasonText =
           failure?.reason === 'plan_only'
             ? `只说了计划没动手（${failure.matched.join('/')}）`
-            : `宣称没有可用工具（${failure?.matched.join('/') ?? ''}）`
+            : `把问题推回给用户、没调工具（${failure?.matched.join('/') ?? ''}）`
         const convId = handler.getConversationId()
 
         if (failure && attempt < maxAttempts) {
