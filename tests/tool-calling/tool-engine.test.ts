@@ -178,10 +178,15 @@ test('non-stream parsing only accepts the selected provider protocol', () => {
   assert.equal(result.choices[0].message.content, '[function_calls][call:default_api:read_file]{"filePath":"/tmp/a"}[/call][/function_calls]')
 })
 
-// —— 回归：GLM 见到 system 里的裸链接会切到"网页助手"人格 ——
-// 实测（2026-11-04）：客户端 system 含一个 workbuddy.cn 链接时，GLM-5.3 会声称
-// "只有一个 open_url 工具""轮数已达上限（3/3）"，3/3 放弃本地工具、不产出 tool_calls；
-// 把该链接替换成占位符后 2/2 正常调用 Skill。因此发往 GLM 前必须摘掉 system 里的链接。
+// —— 回归：GLM 见到字面量 scheme 会切到「网页助手」人格 ——
+//
+// 实测（2026-11-09，GLM-5.3，客户端 dsh 的 31 个工具 + 真实 system）：
+//   https://example.com/a                → parsed=0，声称「只有 open_url」
+//   裸链接但不加抓取提示                   → parsed=0（是 URL 本身，不是提示）
+//   <user_link>https://…</user_link>      → parsed=0
+//   代码围栏 / markdown 链接包住 https://  → parsed=0
+//   example.com/a（剥掉 scheme）           → parsed=1，正常调工具
+// 结论：触发条件是字面量 `http(s)://`，因此 v1.7.2 统一「剥掉 scheme」。
 
 const glmProvider = {
   ...provider,
@@ -190,7 +195,39 @@ const glmProvider = {
   apiEndpoint: 'https://chatglm.cn',
 } as Provider
 
-test('GLM: bare URLs are removed from system but kept in the user message', () => {
+const webFetchTool = {
+  type: 'function' as const,
+  function: {
+    name: 'WebFetch',
+    description: 'Fetch a URL',
+    parameters: { type: 'object', properties: { url: { type: 'string' } } },
+  },
+}
+
+/** dsh 等客户端的抓取工具叫 web_fetch，驼峰/下划线都要能认出来。 */
+const dshWebFetchTool = {
+  type: 'function' as const,
+  function: {
+    name: 'web_fetch',
+    description: 'Fetch a URL',
+    parameters: { type: 'object', properties: { url: { type: 'string' } } },
+  },
+}
+
+function userTextOf(result: { messages: Array<{ role: string; content: unknown }> }): string {
+  return result.messages
+    .filter((message) => message.role === 'user')
+    .map((message) =>
+      typeof message.content === 'string'
+        ? message.content
+        : Array.isArray(message.content)
+          ? message.content.map((part: any) => (part?.type === 'text' ? part.text : '')).join('')
+          : '',
+    )
+    .join('\n')
+}
+
+test('GLM: system URLs are removed and user links lose the scheme', () => {
   const result = new ToolCallingEngine().transformRequest({
     request: request({
       messages: [
@@ -206,25 +243,16 @@ test('GLM: bare URLs are removed from system but kept in the user message', () =
   assert.doesNotMatch(system, /https?:\/\//)
   assert.match(system, /\[链接\]/)
 
-  // user 侧「保留但改写」：地址一个字符不改，只包一层 <user_link>
-  const user = result.messages.find((m) => m.role === 'user')?.content as string
-  assert.match(user, /<user_link>https:\/\/example\.com\/a<\/user_link>/)
-  // 本轮没有 WebFetch 时，指引不能点名不存在的工具
+  const user = userTextOf(result)
+  // 任务本体的链接：保留 域名/路径，剥掉 scheme
+  assert.match(user, /<user_link>example\.com\/a<\/user_link>/)
+  // 提示词里不能再出现可执行的完整地址
+  assert.doesNotMatch(user.split('[System reminder')[0], /https?:\/\//)
+  // 本轮没有抓取工具时，指引不能点名不存在的工具
   assert.match(user, /available fetch tool/)
 })
 
-// —— user 侧链接改写：保留地址，但换一层表达 ——
-
-const webFetchTool = {
-  type: 'function' as const,
-  function: {
-    name: 'WebFetch',
-    description: 'Fetch a URL',
-    parameters: { type: 'object', properties: { url: { type: 'string' } } },
-  },
-}
-
-test('GLM: user link hint names WebFetch when the tool is available', () => {
+test('GLM: hint names WebFetch when the client uses the camelCase tool', () => {
   const result = new ToolCallingEngine().transformRequest({
     request: request({
       messages: [{ role: 'user', content: '总结 https://example.com/post 这篇' }],
@@ -234,9 +262,29 @@ test('GLM: user link hint names WebFetch when the tool is available', () => {
     actualModel: 'glm-5.3',
   })
 
-  const user = result.messages.find((m) => m.role === 'user')?.content as string
-  assert.match(user, /<user_link>https:\/\/example\.com\/post<\/user_link>/)
+  const user = userTextOf(result)
+  assert.match(user, /<user_link>example\.com\/post<\/user_link>/)
   assert.match(user, /WebFetch tool/)
+  assert.match(user, /prepended/)
+})
+
+test('GLM: hint also recognizes snake_case web_fetch and namespaced names', () => {
+  for (const name of ['web_fetch', 'default_api:web_fetch', 'fetch_url']) {
+    const result = new ToolCallingEngine().transformRequest({
+      request: request({
+        messages: [{ role: 'user', content: '总结 https://example.com/post 这篇' }],
+        tools: [
+          ...tools,
+          { type: 'function' as const, function: { ...dshWebFetchTool.function, name } },
+        ],
+      }),
+      provider: glmProvider,
+      actualModel: 'glm-5.3',
+    })
+
+    const user = userTextOf(result)
+    assert.match(user, /WebFetch tool/, `tool name ${name} should be treated as a fetch tool`)
+  }
 })
 
 test('GLM: URLs inside code fences are left untouched', () => {
@@ -247,23 +295,116 @@ test('GLM: URLs inside code fences are left untouched', () => {
     actualModel: 'glm-5.3',
   })
 
-  const user = result.messages.find((m) => m.role === 'user')?.content as string
-  // 代码块内的原样保留，代码块外被包标记
+  const user = userTextOf(result)
+  // 代码块内的原样保留（改了就是损坏内容），代码块外的剥 scheme
   assert.match(user, /curl -H "x: 1" https:\/\/api\.example\.com\/v1\/run/)
-  assert.ok(!user.includes('<user_link>https://api.example.com/v1/run</user_link>'))
-  assert.match(user, /<user_link>https:\/\/example\.com\/doc<\/user_link>/)
+  assert.ok(!user.includes('<user_link>https://'))
+  assert.match(user, /<user_link>example\.com\/doc<\/user_link>/)
 })
 
-test('GLM: markdown link targets are left untouched', () => {
+test('GLM: markdown link targets lose the scheme but keep the link text', () => {
   const result = new ToolCallingEngine().transformRequest({
     request: request({ messages: [{ role: 'user', content: '参考 [官方文档](https://example.com/docs) 写一段' }] }),
     provider: glmProvider,
     actualModel: 'glm-5.3',
   })
 
-  const user = result.messages.find((m) => m.role === 'user')?.content as string
-  assert.match(user, /\[官方文档\]\(https:\/\/example\.com\/docs\)/)
+  const user = userTextOf(result)
+  // markdown 目标不能包标签（会破坏语法），但 scheme 必须剥掉
+  assert.match(user, /\[官方文档\]\(example\.com\/docs\)/)
   assert.ok(!user.includes('<user_link>'))
+})
+
+test('GLM: trailing Chinese punctuation stays outside the user_link tag', () => {
+  const result = new ToolCallingEngine().transformRequest({
+    request: request({ messages: [{ role: 'user', content: '看看这篇 https://example.com/x。然后总结。' }] }),
+    provider: glmProvider,
+    actualModel: 'glm-5.3',
+  })
+
+  const user = userTextOf(result)
+  assert.match(user, /<user_link>example\.com\/x<\/user_link>。/)
+})
+
+test('GLM: loopback and private-network URLs collapse to a placeholder', () => {
+  const result = new ToolCallingEngine().transformRequest({
+    request: request({
+      messages: [
+        {
+          role: 'user',
+          content: '本工作区有哪些文件\n\n运行时上下文: http://127.0.0.1:3080/ 网关 http://192.168.1.9:8080/v1',
+        },
+      ],
+    }),
+    provider: glmProvider,
+    actualModel: 'glm-5.3',
+  })
+
+  const user = userTextOf(result)
+  assert.doesNotMatch(user.split('[System reminder')[0], /127\.0\.0\.1|192\.168/)
+  assert.equal((user.match(/\[链接\]/g) ?? []).length, 2)
+  // 上下文里的地址不是任务本体，绝不能追加抓取指引
+  assert.doesNotMatch(user, /fetch tool/)
+})
+
+test('GLM: public URLs inside injected runtime context are stripped without a hint', () => {
+  const result = new ToolCallingEngine().transformRequest({
+    request: request({
+      messages: [
+        {
+          role: 'user',
+          content: '本工作区有哪些文件\n\n[runtime context] 文档地址 https://www.workbuddy.cn/docs/overview',
+        },
+      ],
+    }),
+    provider: glmProvider,
+    actualModel: 'glm-5.3',
+  })
+
+  const user = userTextOf(result)
+  assert.match(user, /www\.workbuddy\.cn\/docs\/overview/)
+  assert.ok(!user.includes('<user_link>'))
+  assert.doesNotMatch(user, /fetch tool/)
+})
+
+test('GLM: a list of four or more links is treated as reference material', () => {
+  const content = '参考这几个：\nhttps://a.com/1\nhttps://a.com/2\nhttps://a.com/3\nhttps://a.com/4'
+  const result = new ToolCallingEngine().transformRequest({
+    request: request({ messages: [{ role: 'user', content }] }),
+    provider: glmProvider,
+    actualModel: 'glm-5.3',
+  })
+
+  const user = userTextOf(result)
+  assert.ok(!user.includes('<user_link>'))
+  assert.doesNotMatch(user, /fetch tool/)
+  assert.match(user, /a\.com\/1/)
+})
+
+test('GLM: two compared links are not treated as a single fetch target', () => {
+  const content = '对比 https://a.com/1 和 https://b.com/2 在性能、成本、维护性上的差异，给我表格'
+  const result = new ToolCallingEngine().transformRequest({
+    request: request({ messages: [{ role: 'user', content }] }),
+    provider: glmProvider,
+    actualModel: 'glm-5.3',
+  })
+
+  const user = userTextOf(result)
+  assert.ok(!user.includes('<user_link>'))
+  assert.doesNotMatch(user, /fetch tool/)
+})
+
+test('GLM: known-answer indicator words still trigger the fetch hint for two links', () => {
+  const content = '总结这两篇 https://a.com/1 https://b.com/2'
+  const result = new ToolCallingEngine().transformRequest({
+    request: request({ messages: [{ role: 'user', content }], tools: [...tools, dshWebFetchTool] }),
+    provider: glmProvider,
+    actualModel: 'glm-5.3',
+  })
+
+  const user = userTextOf(result)
+  assert.match(user, /<user_link>a\.com\/1<\/user_link>/)
+  assert.match(user, /WebFetch tool/)
 })
 
 test('other providers keep user URLs untouched', () => {
@@ -273,7 +414,7 @@ test('other providers keep user URLs untouched', () => {
     actualModel: 'deepseek-chat',
   })
 
-  const user = result.messages.find((m) => m.role === 'user')?.content as string
+  const user = userTextOf(result)
   assert.match(user, /https:\/\/example\.com\/post/)
   assert.ok(!user.includes('<user_link>'))
 })
@@ -293,15 +434,33 @@ test('other providers keep system URLs untouched', () => {
   assert.match(result.messages[0].content as string, /https:\/\/www\.workbuddy\.cn/)
 })
 
-test('GLM: trailing Chinese punctuation stays outside the user_link tag', () => {
+test('GLM: system URLs inside multimodal parts are defused too', () => {
   const result = new ToolCallingEngine().transformRequest({
-    request: request({ messages: [{ role: 'user', content: '看看这篇 https://example.com/x。然后总结。' }] }),
+    request: request({
+      messages: [
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'Docs: https://www.workbuddy.cn/docs/a' },
+            { type: 'text', text: 'More: https://example.com/b' },
+          ],
+        },
+        { role: 'user', content: 'read /tmp/a' },
+      ],
+    }),
     provider: glmProvider,
     actualModel: 'glm-5.3',
   })
 
-  const user = result.messages.find((m) => m.role === 'user')?.content as string
-  assert.match(user, /<user_link>https:\/\/example\.com\/x<\/user_link>。/)
+  // 第 0 条是注入的工具提示词，原始 system 在其后。
+  const systemMessage = result.messages.find(
+    (m) => m.role === 'system' && Array.isArray(m.content),
+  ) as { content: any[] }
+  const system = systemMessage.content
+    .map((part) => (part.type === 'text' ? part.text : ''))
+    .join('')
+  assert.doesNotMatch(system, /https?:\/\//)
+  assert.equal((system.match(/\[链接\]/g) ?? []).length, 2)
 })
 
 test('GLM: user links inside multimodal text parts are rewritten too', () => {
@@ -323,7 +482,7 @@ test('GLM: user links inside multimodal text parts are rewritten too', () => {
 
   const parts = result.messages.find((m) => m.role === 'user')?.content as any[]
   const text = parts.filter((p) => p.type === 'text').map((p) => p.text).join('')
-  assert.match(text, /<user_link>https:\/\/example\.com\/a<\/user_link>/)
+  assert.match(text, /<user_link>example\.com\/a<\/user_link>/)
   // 图片部件的 URL 不能被改写
   const image = parts.find((p) => p.type === 'image_url')
   assert.equal(image?.image_url?.url, 'https://cdn.example.com/p.png')

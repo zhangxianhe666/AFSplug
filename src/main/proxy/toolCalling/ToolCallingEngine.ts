@@ -7,6 +7,7 @@ import {
 } from '../../../shared/toolCalling.ts'
 import { getToolProtocol } from './protocols/index.ts'
 import { getToolClientAdapter } from './clientAdapters/index.ts'
+import { defuseSystemUrls, rewriteUserUrls } from './linkPolicy.ts'
 import { buildToolCallingRuntimePlan } from './runtimePlan.ts'
 import type { NormalizedToolDefinition, ToolCallingPlan, ToolCallingTransformResult, ToolProtocolId } from './types.ts'
 
@@ -72,9 +73,10 @@ export class ToolCallingEngine {
     // 摘掉 system 里的裸链接：GLM 见到 URL 会切到"只有 open_url"的网页助手人格
     // （见 URL_DEFUSE_PROVIDERS 注释的对照实验）。
     const defused = defuseSystemUrls(trimmed, provider.id, (message) => this.log(message))
-    // user 侧链接保留地址、只换表达（见 rewriteUserUrls 注释）。指引里点名 WebFetch
-    // 的前提是这一轮确实有该工具，否则会指向不存在的工具名。
-    const hasWebFetch = plan.tools.some((tool) => tool.name === 'WebFetch')
+    // user 侧链接剥掉 scheme（见 linkPolicy.ts 的对照实验）。指引里点名 WebFetch 的
+    // 前提是这一轮确实有该工具，否则会指向不存在的工具名——所以工具名要做归一化
+    // 匹配：dsh 叫 web_fetch、Claude 叫 WebFetch、还有客户端叫 fetch_url。
+    const hasWebFetch = plan.tools.some((tool) => FETCH_TOOL_NAME_PATTERN.test(toolBaseName(tool.name)))
     const withUserLinks = rewriteUserUrls(defused, provider.id, hasWebFetch, (message) => this.log(message))
     const messages = injectPrompt(anchorLatestUserMessage(withUserLinks), prompt)
 
@@ -193,6 +195,22 @@ const SYSTEM_TOTAL_BUDGET = 20000
 /** 客户端 system 自身可占用的上限（工具清单很小时不让客户端独吞预算）。 */
 const SYSTEM_TRIM_MAX_CHARS = 12000
 
+/**
+ * 「能抓网页」的工具名归一化匹配。
+ *
+ * 各客户端的命名不统一（WebFetch / web_fetch / fetch / fetch_url），v1.7.1 用的是
+ * 精确相等 `name === 'WebFetch'`，遇到 dsh 的 `web_fetch` 永远判 false，于是提示
+ * 退化成含糊的 "an available fetch tool"——模型更容易幻觉出一个不存在的工具。
+ * 这里去掉命名空间前缀（`default_api:read_file`）后按词形匹配。
+ */
+const FETCH_TOOL_NAME_PATTERN = /^(?:web_?fetch|fetch|fetch_url|url_fetch)$/i
+
+/** 去掉客户端工具名的命名空间前缀（`default_api:web_fetch` → `web_fetch`）。 */
+function toolBaseName(name: string): string {
+  const index = name.lastIndexOf(':')
+  return index >= 0 ? name.slice(index + 1) : name
+}
+
 // 必须保留的段落关键词（身份 + 工具使用 + 工作目录）
 const SYSTEM_KEEP_KEYWORDS = [
   'you are', '你是一个', 'coding agent', '工作目录', 'working directory',
@@ -253,140 +271,6 @@ function trimSystemContent(content: string, maxChars = SYSTEM_TRIM_MAX_CHARS): s
  */
 const LATEST_USER_ANCHOR = '\n\n[System reminder: the tool list at the top of this conversation is current. When the task needs a file, a command, or a skill, call the matching tool and continue from its result.]'
 
-/**
- * 需要摘除 system 裸链接的 provider。
- *
- * 实测（2026-11-04，GLM-5.3 / chatglm.cn）：客户端 system 里只要出现一个
- * http(s) 链接（本例是「参考文档见 https://www.workbuddy.cn/docs/...」），模型
- * 立刻切到「网页助手」人格——声称自己"只有一个 open_url 工具""open_url 多次
- * 返回空""工具调用轮数已达上限（3/3）"，然后放弃本地工具、只输出一段 PPT 文案。
- *
- * 对照实验（同一客户端 system、同一用户消息、同一 22 个工具）：
- *   原始文本（含链接）        → 3/3 失败，无 tool_calls
- *   链接换成 example.com      → 失败
- *   链接替换为 [链接]         → 2/2 成功，正常调用 Skill
- *   只截到链接之前（无链接）  → 成功
- *
- * 成因：chatglm 网页版自身的 agent harness 里确有 open_url 工具，prompt 中的
- * URL 会把它召回，模型遂以"网页工具"的视角解读本应在本地执行的工具清单。
- * 这是模型侧的先验，靠提示词否定句压不住（相反对抗句会被复述）。
- *
- * 只处理 system：用户消息里的链接可能是任务本体（"帮我抓这个页面"），
- * 替换掉会改变语义。
- */
-const URL_DEFUSE_PROVIDERS = new Set(['glm'])
-
-const BARE_URL_PATTERN = /https?:\/\/[^\s<>"'）】\]]+/g
-
-function defuseSystemUrls(
-  messages: ChatMessage[],
-  providerId: string,
-  log: (message: string) => void,
-): ChatMessage[] {
-  if (!URL_DEFUSE_PROVIDERS.has(providerId)) return messages
-  let replaced = 0
-  const next = messages.map((msg) => {
-    if (msg.role !== 'system' || typeof msg.content !== 'string') return msg
-    const content = msg.content.replace(BARE_URL_PATTERN, () => {
-      replaced += 1
-      return '[链接]'
-    })
-    return content === msg.content ? msg : { ...msg, content }
-  })
-  if (replaced > 0) {
-    log(`[ToolCalling] 已从 system 摘除 ${replaced} 个裸链接（防模型切到"网页助手"人格）`)
-  }
-  return next
-}
-
-/**
- * user 侧链接「保留但改写」。
- *
- * 与 system 不同，用户贴的链接就是任务本体（"总结这个页面""按这篇文章做 PPT"），
- * 抹成 `[链接]` 等于把任务目标删掉。但裸 URL 留在 user 里仍会召回 chatglm 网页版
- * 自带的 `open_url` 先验——模型会以为自己能直接开网页，于是不调 WebFetch 就编内容。
- *
- * 折中做法：URL 一个字符不改，只换一层表达——包成 `<user_link>…</user_link>`，
- * 让它读起来是「用户提供的一个待处理对象」，而不是「一句可执行的网址」。
- * 同时在最后一条命中的 user 消息末尾追加正向工具指引（模型注意力最强处），
- * 指向真正能抓网页的工具。
- *
- * 两处保持原样不动：
- *   - 代码块（``` 围栏内）：可能是配置、命令、示例，改了就是损坏内容
- *   - markdown 链接 `[文字](url)` 的圆括号内：包裹会破坏 markdown 语法
- */
-// URL 字符集直接排除中文标点：中文语境里链接后面常紧跟句号逗号（"看这个
-// https://a.com/x。"），不排除的话标点会被吞进地址，改写后模型拿到的就是脏 URL。
-// 中文本身仍允许（维基等站点的路径里有中文），只挡标点。
-const USER_LINK_TAG_PATTERN = /https?:\/\/[^\s<>"'）】\]。，、；：！？》」』【】]+/g
-
-const CODE_FENCE_PATTERN = /(```[\s\S]*?```)/
-
-function rewriteUserUrls(
-  messages: ChatMessage[],
-  providerId: string,
-  hasWebFetch: boolean,
-  log: (message: string) => void,
-): ChatMessage[] {
-  if (!URL_DEFUSE_PROVIDERS.has(providerId)) return messages
-
-  let rewritten = 0
-  let lastHit = -1
-
-  const next = messages.map((msg, index) => {
-    if (msg.role !== 'user') return msg
-
-    let hit = false
-    const rewriteText = (text: string): string => {
-      // 按代码围栏切段，奇数下标是围栏内部，跳过。
-      const segments = text.split(CODE_FENCE_PATTERN)
-      for (let i = 0; i < segments.length; i += 2) {
-        segments[i] = segments[i].replace(USER_LINK_TAG_PATTERN, (url: string, offset: number, whole: string) => {
-          // markdown 链接目标 `[文字](url)`：保持原样，包裹会破坏语法
-          if (whole.slice(Math.max(0, offset - 2), offset) === '](') return url
-          hit = true
-          rewritten += 1
-          return `<user_link>${url}</user_link>`
-        })
-      }
-      return segments.join('')
-    }
-
-    if (typeof msg.content === 'string') {
-      const content = rewriteText(msg.content)
-      if (!hit) return msg
-      lastHit = index
-      return { ...msg, content }
-    }
-
-    // 带附件时 content 是部件数组，只改文本部件，图片等原样保留。
-    if (Array.isArray(msg.content)) {
-      const content = msg.content.map((part) => {
-        if (part.type !== 'text' || typeof part.text !== 'string') return part
-        const text = rewriteText(part.text)
-        return text === part.text ? part : { ...part, text }
-      })
-      if (!hit) return msg
-      lastHit = index
-      return { ...msg, content }
-    }
-
-    return msg
-  })
-
-  if (lastHit >= 0) {
-    const hint = hasWebFetch
-      ? '\n\n[System reminder: the <user_link> entries above are URLs the user supplied. Fetch them with the WebFetch tool, then answer from what it returns.]'
-      : '\n\n[System reminder: the <user_link> entries above are URLs the user supplied. Read them with an available fetch tool before answering.]'
-    const target = next[lastHit]
-    next[lastHit] = Array.isArray(target.content)
-      ? { ...target, content: [...target.content, { type: 'text' as const, text: hint }] }
-      : { ...target, content: `${target.content ?? ''}${hint}` }
-    log(`[ToolCalling] 已改写 user 消息中的 ${rewritten} 个链接为 <user_link>（保留地址，避免召回 open_url 人格）`)
-  }
-
-  return next
-}
 
 function anchorLatestUserMessage(messages: ChatMessage[]): ChatMessage[] {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
