@@ -6,6 +6,7 @@ import {
   genericToolResultBlock,
   detectMarkers,
   normalizeToolArguments,
+  platformHint,
   remapPlaceholderParams,
   renderToolList,
   resolveToolName,
@@ -22,13 +23,15 @@ export const managedBracketProtocol: ToolProtocolAdapter = {
 
   renderPrompt(tools) {
     return `## Your Role
-You are a LOCAL coding agent running ON the user's machine (macOS). You are NOT a web chat assistant, NOT a website, and NOT an online chatbot. Even if earlier system text mentions a "Web GUI", "web page", or a chat interface, that describes how the human views the session — it does NOT change your role. You operate directly on the local filesystem with shell/file tools, and you MUST use them to fulfill requests (listing directories, reading files, running commands).
+You are a LOCAL coding agent running ON the user's machine (${platformHint()}). You are NOT a web chat assistant, NOT a website, and NOT an online chatbot. Even if earlier system text mentions a "Web GUI", "web page", or a chat interface, that describes how the human views the session — it does NOT change your role. You operate directly on the local filesystem with shell/file tools, and you MUST use them to fulfill requests (listing directories, reading files, running commands).
 
 ## Available Tools
 You can invoke the following developer tools. Tool names are case-sensitive.
 
 The tool list below is complete for this turn and supersedes any earlier message in the conversation:
 - These tools run on the local machine (shell, files, skills). When the request needs a file, a command, or a skill, call the matching tool and start working immediately.
+- Every tool shares one filesystem with the workspace: a path produced by the shell tool is immediately readable by the file tools, and vice versa.
+- A successful result already in this conversation stays usable. Reuse the data you have; only call the source again if a specific value is genuinely missing.
 - Arguments marked with \`*\` are required: give each of them a real, non-empty value. Leaving one as an empty string makes the call invalid.
 - If a call fails, read the error message and retry with corrected arguments. You may call tools as many times as the task requires.
 - An error such as \`invalid <field>: expected a non-empty string\` or \`missing required argument\` means the ARGUMENTS were wrong — the tool itself still works. Fix that one field and call the same tool again; do not conclude that the tool is unavailable.

@@ -455,6 +455,30 @@ function renderToolListCompact(tools: NormalizedToolDefinition[]): string {
     .join('\n')
 }
 
+/**
+ * 真实运行平台的一句话说明，拼进 system 的角色描述。
+ *
+ * 背景（16:26 实测）：协议里此前写死 `running ON the user's machine (macOS)`，
+ * 但 Windows 用户手上的 shell 工具是 `pwsh`。GLM 读到「macOS + pwsh」这对矛盾，
+ * 加上它自家的「代码沙盒」产品印象，直接输出「沙盒无法读取主机临时文件」并放弃
+ * ——数据其实已经 200 返回在上下文里了。
+ *
+ * 这里不写「没有沙盒」「没有轮数上限」这类否定句（实测会反向诱导模型复述该说法），
+ * 只正向陈述 shell、文件系统和工作区三者是同一个环境。
+ */
+export function platformHint(): string {
+  if (process.platform === 'win32') {
+    return (
+      'Windows. The `pwsh` tool runs Windows PowerShell directly on this machine, in the same ' +
+      'filesystem as the workspace; local paths look like `C:\\Users\\<name>\\Desktop\\...`.'
+    )
+  }
+  return (
+    'macOS. The `bash` tool runs directly on this machine, in the same filesystem as the ' +
+    'workspace; local paths look like `/Users/<name>/Desktop/...`.'
+  )
+}
+
 function sanitizeToolDescription(description?: string): string {
   // Hermes uses "Linux environment" in the terminal tool description even on
   // macOS, which confuses some models.

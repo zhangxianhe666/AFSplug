@@ -41,6 +41,7 @@ export type LedgerReason =
   | 'backed'            // 断言有账本支撑
   | 'unbacked_claim'    // 声称已获取数据，但账本里没有一次成功调用 → 假完成
   | 'gave_up'           // 最后一次调用失败 + 正文自述未完成 → 失败即收工
+  | 'fake_limit'        // 虚构「轮数上限 / 沙盒无法读本地文件」并据此收工
 
 export interface LedgerVerdict {
   /** 是否建议作废本轮、重开一轮。 */
@@ -62,9 +63,26 @@ export interface LedgerOptions {
   userText?: string
 }
 
-/** 工具结果里的失败标记。 */
+/**
+ * 工具结果里的失败标记。
+ *
+ * HTTP 只认带 `HTTP` 前缀的状态码：裸 `\b403\b` 会命中正文数据里的场馆号、
+ * 观众人数、球员身高之类的数字，把成功结果记成失败（16:26 的 fail=1 即此）。
+ */
 const FAILURE_PATTERN =
-  /(?:HTTP\s*[45]\d{2}|Access Denied|\b(?:403|404|429|500|502|503)\b|ENOENT|ECONNREFUSED|ETIMEDOUT|EACCES|command not found|not recognized as an internal|Permission denied|请求失败|调用失败|执行失败|请求超时|认证失败)/i
+  /(?:HTTP[^0-9]{0,6}[45]\d{2}|Access Denied|ENOENT|ECONNREFUSED|ETIMEDOUT|EACCES|command not found|is not recognized as an internal or external command|识别为 cmdlet|Permission denied|Exit Code:\s*[1-9]\d*|请求失败|调用失败|执行失败|请求超时|认证失败)/i
+
+/**
+ * 只看结果的头尾判断成败。
+ *
+ * 工具结果真正的错误摘要总在开头（`[TOOL_ERROR]` / `HTTP 403` / `Exit Code: 1`），
+ * 正文数据中间的偶然命中不算。中间 4 万字符的 JSON 一个词判错，账本就失真。
+ */
+function isFailureText(text: string): boolean {
+  if (!text) return false
+  if (text.startsWith('[TOOL_ERROR]')) return true
+  return FAILURE_PATTERN.test(text.slice(0, 400)) || FAILURE_PATTERN.test(text.slice(-400))
+}
 
 /**
  * 「已获取 / 已抓到」类断言。
@@ -92,6 +110,20 @@ const TASK_REQUEST =
 /** 正文自述「没做完」。 */
 const GIVE_UP_PATTERN =
   /(未完成|未能|尚未完成|没能|无法完成|无法继续|无法完成该任务|本次任务未能|任务失败|暂时无法|抱歉)/
+
+/**
+ * 虚构的平台限制。
+ *
+ * GLM 网页版自带「代码沙盒 / 对话轮数」的产品语境。任务一卡住，它就把这套语境套到
+ * 本机工具上，输出「沙盒无法读取主机临时文件」「工具调用已达本轮上限」，然后收工。
+ *
+ * 这两句在本机上都不成立，是可客观核验的事实：pwsh 与工作区共用同一个文件系统；
+ * 代理层也没有任何轮数上限（代码里没有这个配置）。16:26 的现场是——ESPN 数据已经
+ * HTTP 200 返回在上下文里，它仍以这句话结束回合，而当时的词表只认「未完成/无法完成」，
+ * 一个字都没命中，判据返回 no_claim。
+ */
+const FAKE_LIMIT_PATTERN =
+  /(?:(?:轮数|轮次|调用次数|工具调用|回合|对话轮)[^\n。；;]{0,14}(?:上限|限制|用完|耗尽|用尽|达到)|(?:已达|达到|超出|超过)[^\n。；;]{0,10}(?:上限|轮数|轮次)|(?:沙盒|沙箱)[^\n。；;]{0,16}(?:无法|不能|不支持|受限|读不到|读不了)|(?:无法|不能)(?:读取|访问)(?:主机|本地)(?:的)?(?:临时)?文件)/
 
 function textOf(content: unknown): string {
   if (typeof content === 'string') return content
@@ -122,7 +154,7 @@ export function collectToolResults(
   for (const message of messages) {
     if (!message || message.role !== 'tool') continue
     const text = textOf(message.content)
-    results.push({ ok: !FAILURE_PATTERN.test(text), text })
+    results.push({ ok: !isFailureText(text), text })
   }
   return results
 }
@@ -217,6 +249,13 @@ export function detectUnbackedProgress(
     return verdict(true, 'unbacked_claim', { ...stats, matched: claims })
   }
 
+  // 虚构限制优先于通用「收工」判据：这句话本身就是「我不干了」的明确信号，
+  // 而且不依赖账本成败——16:26 账本里恰恰有一次成功，按兜底逻辑会被放行。
+  const fakeLimit = text.match(FAKE_LIMIT_PATTERN)
+  if (fakeLimit) {
+    return verdict(true, 'fake_limit', { ...stats, matched: [fakeLimit[0].slice(0, 60)] })
+  }
+
   // 没有「已获取」类断言，但正文自述没做完 → 失败即收工。
   //
   // 不再要求「账本里必须有一条失败记录」：工具结果的 messages 形态由客户端决定
@@ -237,6 +276,22 @@ export function progressNudge(verdict: LedgerVerdict, protocol?: ToolProtocolId)
     protocol === 'managed_xml'
       ? '<tool_call>{"name":"web_fetch","arguments":{"url":"…"}}</tool_call>'
       : '[function_calls][call:web_fetch]{"url":"…"}[/call][/function_calls]'
+
+  // 虚构限制要逐条拆掉，不能只说「继续」。
+  // 模型是在一个具体的错误认知上收工的，只喊继续它会用同样的理由再收一次工。
+  if (verdict.reason === 'fake_limit') {
+    return [
+      `（系统纠偏，不是用户提问）你上一轮用「${verdict.matched[0] ?? '轮数上限 / 沙盒限制'}」这个理由停下了，这个理由不成立：`,
+      '- 工具调用没有轮数上限，可以一路调用到任务做完为止；',
+      '- pwsh 与文件工具在同一台机器、同一个文件系统上，一方写的文件另一方立刻能读写；',
+      '- 前面那几次调用是成功的，返回的数据就在上面的工具结果里，属于当前可用的真实数据。',
+      '现在直接接着做，不要再抓一次同样的数据。本轮只输出一个工具调用块，完成剩下那一步：把已有数据写进用户要求的文件（内容多就分批写，先写表头，再追加行）。',
+      '如果你认为自己缺的是某个具体字段，只补抓那个字段。',
+      '调用格式：',
+      hint,
+    ].join('\n')
+  }
+
   const lines = [
     verdict.reason === 'unbacked_claim'
       ? '（系统纠偏，不是用户提问）上一轮正文里的「已获取 / 已完成」没有对应的成功调用记录，任务还停在这一步。'

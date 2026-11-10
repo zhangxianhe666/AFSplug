@@ -716,7 +716,8 @@ export class RequestForwarder {
           userText: lastUserText(transformed.messages),
         })
         // 判定结果必须落日志：判据没触发时，只能靠这行区分「没命中」和「没跑」。
-        if (ledger.reason !== 'has_tool_calls') {
+        // not_managed / no_tools 是客户端自己发的小请求（标题生成等），打出来只是噪音。
+        if (ledger.reason !== 'has_tool_calls' && ledger.reason !== 'not_managed' && ledger.reason !== 'no_tools') {
           storeManager.addLog(
             'info',
             `[ToolCalling] 对账：GLM ok=${ledger.okCount} fail=${ledger.failCount} reason=${ledger.reason} retry=${ledger.retry}`,
@@ -753,7 +754,9 @@ export class RequestForwarder {
             `[ToolCalling] 核验失败：GLM 第 ${attempt} 轮${
               ledger.reason === 'unbacked_claim'
                 ? `声称已获取数据（${ledger.matched[0] ?? ''}）但成功调用数为 0`
-                : '工具失败后直接收工'
+                : ledger.reason === 'fake_limit'
+                  ? `以「${ledger.matched[0] ?? '轮数上限'}」为由收工（该限制不存在）`
+                  : '工具失败后直接收工'
             }，作废一轮重开（带纠偏提示）`,
           )
           retryHint = progressNudge(ledger, transformed.plan.protocol)
@@ -966,7 +969,7 @@ export class RequestForwarder {
           messages: transformed.messages,
           userText,
         })
-        if (ledger.reason !== 'has_tool_calls') {
+        if (ledger.reason !== 'has_tool_calls' && ledger.reason !== 'not_managed' && ledger.reason !== 'no_tools') {
           storeManager.addLog(
             'info',
             `[ToolCalling] 对账：Kimi ok=${ledger.okCount} fail=${ledger.failCount} reason=${ledger.reason} retry=${ledger.retry}`,
@@ -1008,7 +1011,9 @@ export class RequestForwarder {
               `[ToolCalling] 核验失败：Kimi 第 ${attempt} 轮${
                 ledger.reason === 'unbacked_claim'
                   ? `声称已获取数据（${ledger.matched[0] ?? ''}）但成功调用数为 0`
-                  : '工具失败后直接收工'
+                  : ledger.reason === 'fake_limit'
+                    ? `以「${ledger.matched[0] ?? '轮数上限'}」为由收工（该限制不存在）`
+                    : '工具失败后直接收工'
               }，作废一轮重开（带纠偏提示）`,
             )
             nudge = progressNudge(ledger, transformed.plan.protocol)
