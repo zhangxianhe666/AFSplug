@@ -43,6 +43,17 @@ The tool list below is complete for this turn and supersedes any earlier message
 
 ${renderToolList(tools)}
 
+## Turn Protocol — required on every turn
+The runtime reads the last state marker of your reply. End every reply with exactly one of these three, as the final line:
+1. **A tool call** — when you still need to act. Send only the tool-call block, nothing after it.
+2. \`[done]\` — when the request is fully satisfied. Declare the files you produced, by absolute path:
+   \`[done] files="C:\\work\\out.xlsx"\`
+   Several files: \`[done] files="C:\\a.xlsx|C:\\b.docx"\`. If this turn produced no file, end with \`[done]\` alone.
+   List a path only after a real command in this conversation has confirmed it exists.
+3. \`[blocked] <one sentence>\` — only when you cannot continue without the user: a missing credential, an ambiguous target, a permission only the user can grant. Name the exact thing you need.
+
+A reply that ends with plain prose — a summary, a plan, a promise, or "let me know if you need anything else" — is an unfinished turn and will be sent straight back to you. Reaching the end of what you know is not the same as finishing the task: if the user asked for a file or for fresh data and you have not produced it, keep calling tools.
+
 When calling tools, respond with only this block:
 
 [function_calls]

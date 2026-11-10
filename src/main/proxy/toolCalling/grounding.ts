@@ -64,7 +64,7 @@ export interface GroundingOptions {
 
 /** 创建 / 写入类断言。只有命中这些动词，才会去核验路径。 */
 const CREATION_CLAIM =
-  /(?:已(?:经)?(?:写入|写进|写到|创建|新建|生成|保存|存到|放到|导出|建好|写好|做好)|写入(?:到|至|了)|保存(?:到|为|至|了)|创建了|新建了|生成了|导出到|保存成功|写入成功|created|saved|written|exported)/i
+  /(?:已(?:经)?(?:成功|顺利)?(?:写入|写进|写到|创建|新建|生成|保存|存到|放到|导出|建好|写好|做好)|写入(?:到|至|了)|保存(?:到|为|至|了)|(?:创建|新建|生成)了|已(?:经)?(?:成功|顺利)?(?:创建|生成|写入)|导出到|保存成功|写入成功|创建成功|生成成功|created|saved|written|exported)/i
 
 /** 文件后缀白名单：只核验「产物类」路径，避免把日志行、目录当目标。 */
 const ARTIFACT_EXT = /\.(?:xlsx|xlsm|xls|csv|tsv|docx|doc|pptx|ppt|pdf|txt|md|json|ya?ml|py|js|ts|tsx|java|go|rs|html|htm|css|sh|ps1|zip|tar|gz|png|jpe?g|svg|mp4|wav)$/i

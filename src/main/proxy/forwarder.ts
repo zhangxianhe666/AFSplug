@@ -33,6 +33,12 @@ import {
 } from './toolCalling/hallucinationGuard'
 import { detectFalseFileClaim, groundingNudge } from './toolCalling/grounding'
 import { detectUnbackedProgress, progressNudge } from './toolCalling/actionLedger'
+import {
+  detectTurnState,
+  stripTurnMarker,
+  turnStateNudge,
+  turnStateRetryBudget,
+} from './toolCalling/turnState'
 import type { ToolCallingTransformResult } from './toolCalling/types'
 import { sessionManager } from './sessionManager'
 import {
@@ -639,6 +645,47 @@ export class RequestForwarder {
     }
   }
 
+  /** 交付前剥掉协议标记：`[done] files=…` 是内部核算用的，不该给用户看。 */
+  private stripTurnState(result: any): void {
+    const message = result?.choices?.[0]?.message
+    if (!message) return
+    const content = message.content
+    if (typeof content === 'string') {
+      if (!content) return
+      const cleaned = stripTurnMarker(content)
+      message.content = cleaned || (Array.isArray(message.tool_calls) && message.tool_calls.length > 0 ? '' : '完成。')
+      return
+    }
+    if (Array.isArray(content)) {
+      const text = content
+        .map((part: any) => (typeof part === 'string' ? part : (part?.text ?? '')))
+        .join('\n')
+      const cleaned = stripTurnMarker(text)
+      if (cleaned !== text) message.content = cleaned
+    }
+  }
+
+  /**
+   * 重开次数用尽且这一轮没按协议收尾：给用户一个事实标注。
+   *
+   * 不写「模型撒谎」这种定性，只陈述可核验的事实——这一轮没有工具调用、没有产物
+   * 声明，所以上面那段总结没有被验证过。用户据此自己判断要不要再问一次。
+   */
+  private annotateUnverifiedTurn(result: any): void {
+    const message = result?.choices?.[0]?.message
+    if (!message) return
+    const note =
+      '\n\n---\n⚠️ AFS 提示：以上这条回复没有按协议以工具调用或完成标记结尾，' +
+      '本轮没有任何工具真正执行，内容未经核验。若任务涉及文件或实时数据，请再发一次「继续」。'
+    const content = message.content
+    if (typeof content === 'string') {
+      if (content.includes('⚠️ AFS 提示')) return
+      message.content = `${content}${note}`
+    } else if (Array.isArray(content)) {
+      content.push({ type: 'text', text: note })
+    }
+  }
+
   private logGroundingDiagnostics(provider: string, verdict: ReturnType<typeof detectFalseFileClaim>): void {
     if (verdict.reason === 'alien_root') {
       storeManager.addLog(
@@ -671,6 +718,9 @@ export class RequestForwarder {
   ): Promise<ForwardResult> {
     try {
       const maxAttempts = 1 + this.guardRetryBudget()
+      // 三态违约的重开单独计数：它覆盖「零调用就收工」这一大类，但不该独吞全部预算。
+      const turnStateBudget = turnStateRetryBudget()
+      let turnStateRetries = 0
       const adapter = new GLMAdapter(provider, account)
       let lastResponse: any = null
       let result: any = null
@@ -762,6 +812,20 @@ export class RequestForwarder {
           await adapter.deleteConversation(convId)
         }
 
+        // 三态协议：不再从措辞推断「是否结束」，只看有没有按协议打结尾状态。
+        const turnState = detectTurnState(attemptResult, transformed.plan, {
+          messages: transformed.messages,
+          userText: lastUserText(transformed.messages),
+        })
+        if (turnState.reason !== 'has_tool_calls' && turnState.reason !== 'not_managed') {
+          storeManager.addLog(
+            'info',
+            `[ToolCalling] 三态：GLM state=${turnState.state} reason=${turnState.reason} retry=${turnState.retry}`,
+          )
+        }
+        // [done] 且产物经磁盘确认 → 这是最硬的完成证据，后续词表判据一律让路。
+        const doneConfirmed = turnState.reason === 'done_verified'
+
         if (grounding.retry) {
           if (attempt < maxAttempts) {
             storeManager.addLog(
@@ -776,7 +840,33 @@ export class RequestForwarder {
             `[ToolCalling] 核验失败：第 ${attempt} 轮声称写入的文件仍不存在（${grounding.missing.join('、')}），重试已用尽`,
           )
           this.annotateMissingOutput(attemptResult, grounding.missing)
-        } else if (ledger.retry && attempt < maxAttempts) {
+        } else if (
+          turnState.retry &&
+          !doneConfirmed &&
+          attempt < maxAttempts &&
+          turnStateRetries < turnStateBudget
+        ) {
+          turnStateRetries += 1
+          storeManager.addLog(
+            'warn',
+            `[ToolCalling] 三态违约：GLM 第 ${attempt} 轮 state=${turnState.state} reason=${turnState.reason}${
+              turnState.fake.length > 0 ? `（虚构理由：${turnState.fake[0]}）` : ''
+            }，作废一轮重开（带格式纠偏）`,
+          )
+          retryHint = turnStateNudge(turnState, transformed.plan.protocol)
+          continue
+        } else if (turnState.retry && !doneConfirmed) {
+          storeManager.addLog(
+            'warn',
+            `[ToolCalling] 三态违约：GLM 第 ${attempt} 轮仍未按协议收尾（${turnState.reason}），重开次数已用尽`,
+          )
+          if (turnState.missing.length > 0) {
+            this.annotateMissingOutput(attemptResult, turnState.missing)
+          }
+          if (turnState.reason === 'undeclared_task') {
+            this.annotateUnverifiedTurn(attemptResult)
+          }
+        } else if (ledger.retry && !doneConfirmed && attempt < maxAttempts) {
           storeManager.addLog(
             'warn',
             `[ToolCalling] 核验失败：GLM 第 ${attempt} 轮${
@@ -789,7 +879,7 @@ export class RequestForwarder {
           )
           retryHint = progressNudge(ledger, transformed.plan.protocol)
           continue
-        } else if (ledger.retry) {
+        } else if (ledger.retry && !doneConfirmed) {
           storeManager.addLog(
             'warn',
             `[ToolCalling] 核验失败：第 ${attempt} 轮仍未真正取到数据（${ledger.reason}），重试已用尽`,
@@ -814,6 +904,7 @@ export class RequestForwarder {
         lastResponse = response
         result = attemptResult
         handler = attemptHandler
+        this.stripTurnState(attemptResult)
         break
       }
 
@@ -877,6 +968,8 @@ export class RequestForwarder {
       // 请求保持原来的直通流式，不加延迟）。
       const managed = transformed.plan.mode === 'managed' && transformed.plan.shouldParseResponse
       const maxAttempts = managed ? 1 + this.guardRetryBudget() : 1
+      const turnStateBudget = turnStateRetryBudget()
+      let turnStateRetries = 0
       const latencyBase = startTime
 
       if (!managed) {
@@ -1013,6 +1106,20 @@ export class RequestForwarder {
             : `把问题推回给用户、没调工具（${phraseFailure?.matched.join('/') ?? ''}）`
         const convId = handler.getConversationId()
 
+        // 三态协议：不再从措辞推断「是否结束」，只看有没有按协议打结尾状态。
+        const turnState = detectTurnState(result, transformed.plan, {
+          messages: transformed.messages,
+          userText,
+        })
+        if (turnState.reason !== 'has_tool_calls' && turnState.reason !== 'not_managed') {
+          storeManager.addLog(
+            'info',
+            `[ToolCalling] 三态：Kimi state=${turnState.state} reason=${turnState.reason} retry=${turnState.retry}`,
+          )
+        }
+        // [done] 且产物经磁盘确认 → 最硬的完成证据，后续词表判据一律让路。
+        const doneConfirmed = turnState.reason === 'done_verified'
+
         if (grounding.retry && attempt < maxAttempts) {
           storeManager.addLog(
             'warn',
@@ -1033,7 +1140,30 @@ export class RequestForwarder {
           this.annotateMissingOutput(result, grounding.missing)
         }
 
-        if (ledger.retry && !grounding.retry) {
+        if (turnState.retry && !grounding.retry && !doneConfirmed) {
+          if (attempt < maxAttempts && turnStateRetries < turnStateBudget) {
+            turnStateRetries += 1
+            storeManager.addLog(
+              'warn',
+              `[ToolCalling] 三态违约：Kimi 第 ${attempt} 轮 state=${turnState.state} reason=${turnState.reason}${
+                turnState.fake.length > 0 ? `（虚构理由：${turnState.fake[0]}）` : ''
+              }，作废一轮重开（带格式纠偏）`,
+            )
+            nudge = turnStateNudge(turnState, transformed.plan.protocol)
+            if (shouldDeleteSession() && convId) {
+              await adapter.deleteConversation(convId).catch(() => {})
+            }
+            continue
+          }
+          storeManager.addLog(
+            'warn',
+            `[ToolCalling] 三态违约：Kimi 第 ${attempt} 轮仍未按协议收尾（${turnState.reason}），重开次数已用尽`,
+          )
+          if (turnState.missing.length > 0) this.annotateMissingOutput(result, turnState.missing)
+          if (turnState.reason === 'undeclared_task') this.annotateUnverifiedTurn(result)
+        }
+
+        if (ledger.retry && !grounding.retry && !doneConfirmed && !turnState.retry) {
           if (attempt < maxAttempts) {
             storeManager.addLog(
               'warn',
@@ -1057,7 +1187,7 @@ export class RequestForwarder {
           )
         }
 
-        if (phraseFailure && !grounding.retry && !ledger.retry) {
+        if (phraseFailure && !grounding.retry && !ledger.retry && !turnState.retry) {
           if (this.phraseRetryEnabled() && attempt < maxAttempts) {
             storeManager.addLog(
               'warn',
@@ -1077,6 +1207,7 @@ export class RequestForwarder {
 
         this.logGroundingDiagnostics('Kimi', grounding)
 
+        this.stripTurnState(result)
         finalResult = result
         finalHandler = handler
         finalResponse = response

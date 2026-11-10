@@ -196,3 +196,33 @@ test('nudge: 点名否认「权限/沙箱」这个具体误解', () => {
   assert.match(text, /不是权限或沙箱/)
   assert.match(text, /同一个文件系统/)
 })
+
+// ── 断言词表：「已成功创建」这类插入语（11-10 首轮现场）────────────────────
+//
+// 原词表要求「已创建」紧邻，中间夹一个「成功」就漏匹配：
+// 「已成功创建 NBA.xlsx」判成 no_claim，落盘核验直接放行——而这正是用户说的
+// 「说建好了但找不到」的第一现场。
+
+test('claim: 「已成功创建 X.xlsx」也算创建断言', () => {
+  const verdict = detectFalseFileClaim(reply('已成功创建 BU.xlsx，包含今日全部赛果。'), {
+    messages: [systemMsg],
+  })
+  assert.notEqual(verdict.reason, 'no_claim', '断言没被识别')
+  assert.equal(verdict.retry, true)
+  assert.equal(verdict.missing.length, 1)
+})
+
+test('claim: 「已顺利生成」同样命中', () => {
+  const verdict = detectFalseFileClaim(reply('已顺利生成报告，见 BU.xlsx。'), {
+    messages: [systemMsg],
+  })
+  assert.equal(verdict.retry, true)
+})
+
+test('claim: 只是提到文件、没有完成态动词时不误判', () => {
+  const verdict = detectFalseFileClaim(reply('建议把结果存成 BU.xlsx，需要我继续吗？'), {
+    messages: [systemMsg],
+  })
+  assert.equal(verdict.reason, 'no_claim')
+  assert.equal(verdict.retry, false)
+})

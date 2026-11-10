@@ -104,8 +104,8 @@ const FETCH_CLAIM_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
 /** 断言窗口内出现这些词，说明是否定/未完成语境，不当作「已完成」。 */
 const CLAIM_NEGATION = /(?:尚未|未能|没有|没能|无法|失败|不成功|未获取|未完成)/
 
-/** 用户这一轮在要产出（而不是问概念）。 */
-const TASK_REQUEST =
+/** 用户这一轮在要产出（而不是问概念）。三态协议也用它判断「是否任务回合」。 */
+export const TASK_REQUEST =
   /(抓取|获取|查询|搜索|整理|汇总|写入|写进|保存|导出|新建|创建|生成|制作|做一|帮我|跑一下|运行|下载|爬|fetch|scrape|write|save|create|export|generate|download|继续|接着|下一步|往下|go on|continue)/i
 
 /** 正文自述「没做完」。 */
@@ -123,7 +123,7 @@ const GIVE_UP_PATTERN =
  * HTTP 200 返回在上下文里，它仍以这句话结束回合，而当时的词表只认「未完成/无法完成」，
  * 一个字都没命中，判据返回 no_claim。
  */
-const FAKE_LIMIT_PATTERN =
+export const FAKE_LIMIT_PATTERN =
   /(?:(?:轮数|轮次|调用次数|工具调用|回合|对话轮)[^\n。；;]{0,14}(?:上限|限制|用完|耗尽|用尽|达到)|(?:已达|达到|超出|超过)[^\n。；;]{0,10}(?:上限|轮数|轮次)|(?:沙盒|沙箱)[^\n。；;]{0,16}(?:无法|不能|不支持|受限|读不到|读不了)|(?:无法|不能)(?:读取|访问)(?:主机|本地)(?:的)?(?:临时)?文件)/
 
 function textOf(content: unknown): string {

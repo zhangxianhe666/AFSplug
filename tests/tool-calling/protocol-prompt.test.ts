@@ -95,3 +95,34 @@ test('过滤后任务的真实参数仍在（不能把工具删残）', () => {
   assert.match(prompt, /path/)
   assert.match(prompt, /content/)
 })
+
+// ── 回合三态协议必须写进 system（v1.7.9）─────────────────────────────────────
+//
+// 状态机要生效，前提是模型知道有这三个状态。少写一条，对应的判定就永远不命中。
+
+test('协议声明三态：工具调用 / [done] / [blocked]', () => {
+  for (const protocol of [managedXmlProtocol, managedBracketProtocol]) {
+    const prompt = protocol.renderPrompt(tools)
+    assert.match(prompt, /Turn Protocol/, `${protocol.id} 缺三态协议段落`)
+    assert.match(prompt, /\[done\]/, `${protocol.id} 缺 [done]`)
+    assert.match(prompt, /\[blocked\]/, `${protocol.id} 缺 [blocked]`)
+    assert.match(prompt, /files=/, `${protocol.id} 缺产物声明写法`)
+  }
+})
+
+test('协议明确「无结尾状态的纯文本回合不算结束」', () => {
+  // 这一句是 UNDECLARED 判据的合法性来源，必须出现在说明里，否则重开会显得无理。
+  for (const protocol of [managedXmlProtocol, managedBracketProtocol]) {
+    const prompt = protocol.renderPrompt(tools)
+    assert.match(prompt, /unfinished turn|unfinished/i, `${protocol.id} 未说明纯文本回合未结束`)
+  }
+})
+
+test('[done] 只在真实确认后才允许列路径', () => {
+  // 否则模型会把「我打算写到 C:\a.xlsx」也写进 files=，核验立刻判违约，
+  // 变成无意义的重开循环。
+  for (const protocol of [managedXmlProtocol, managedBracketProtocol]) {
+    const prompt = protocol.renderPrompt(tools)
+    assert.match(prompt, /confirmed it exists|confirmed/i, `${protocol.id} 未要求先确认产物存在`)
+  }
+})
