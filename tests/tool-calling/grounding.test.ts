@@ -164,15 +164,35 @@ test('guard: DRYRUN 下只记日志、不重试', () => {
   }
 })
 
-test('nudge: 只写正向动作，不出现否定句与禁止物名称', () => {
-  const text = groundingNudge(['C:\\ws\\BU.xlsx'], 'managed_bracket')
-  assert.ok(text.includes('C:\\ws\\BU.xlsx'))
-  assert.ok(text.includes('[function_calls]'))
-  assert.ok(!/没有|不要|禁止|沙盒|联网|轮数/.test(text))
+test('nudge: 点名目标路径、示例与协议一致（bracket）', () => {
+  const text = groundingNudge(['C:\\ws\\notes.md'], 'managed_bracket')
+  assert.ok(text.includes('C:\\ws\\notes.md'))
+  assert.ok(text.includes('[function_calls][call:write]'))
 })
 
-test('nudge: xml 协议给 xml 示例', () => {
-  const text = groundingNudge(['C:\\ws\\BU.xlsx'], 'managed_xml')
-  assert.ok(text.includes('<tool_call>'))
+test('nudge: xml 协议给 xml 示例，不再是 <tool_call>{…}', () => {
+  // 16:02 现场：旧文案给的是 <tool_call>{"name":"write",…}</tool_call>，
+  // managed_xml 的解析器一个都认不出，重开那一轮白费。
+  const text = groundingNudge(['C:\\ws\\notes.md'], 'managed_xml')
+  assert.ok(text.includes('<tool_calls><invoke name="write">'))
   assert.ok(!text.includes('[function_calls]'))
+  assert.ok(!text.includes('<tool_call>{'))
+})
+
+test('nudge: 目标是 xlsx 时给 python 生成命令，不引导 write 写文本', () => {
+  // write 是文本写入，写 .xlsx 得到的是损坏文件——模型照做也打不开。
+  const text = groundingNudge(['C:\\ws\\NBA.xlsx'], 'managed_xml')
+  assert.match(text, /<invoke name="pwsh">/)
+  assert.match(text, /openpyxl/)
+  assert.doesNotMatch(text, /<invoke name="write">/)
+})
+
+test('nudge: 点名否认「权限/沙箱」这个具体误解', () => {
+  // 旧版刻意不写否定句（担心反向注入），但现场证明模型会自己发明
+  // 「沙箱与本地文件系统隔离」，不点破它，下一轮还是同样的理由。
+  // 这里的是非判断必须先发生：文件此刻确实不存在，写工作区确实是被允许的。
+  const text = groundingNudge(['C:\\ws\\BU.xlsx'], 'managed_xml')
+  assert.match(text, /不存在/)
+  assert.match(text, /不是权限或沙箱/)
+  assert.match(text, /同一个文件系统/)
 })

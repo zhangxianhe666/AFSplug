@@ -191,8 +191,11 @@ test('纠偏文案：点出失败原因、要求下一步一个动作、带可�
   )
   assert.match(nudge, /HTTP 403/)
   assert.match(nudge, /换一个同类公开来源/)
-  assert.match(nudge, /<tool_call>/)
   assert.match(nudge, /本轮只做一件最小的事/)
+  // 格式必须和 managed_xml 协议一致：写死 <tool_call>{…}</tool_call> 时解析器认不出，
+  // 重开的那一轮等于白给（16:02 现场）。
+  assert.match(nudge, /<tool_calls><invoke name="web_fetch"><parameter name="url">/)
+  assert.doesNotMatch(nudge, /<tool_call>\{/)
 })
 
 // ── 虚构限制（16:26 真实现场）──────────────────────────────────────────────

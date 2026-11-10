@@ -1,6 +1,7 @@
 import { existsSync, statSync } from 'node:fs'
 import path from 'node:path'
 import type { ToolProtocolId } from './types.ts'
+import { renderCallExample } from './callExample.ts'
 
 /**
  * 落盘核验（v1.7.4，第一层兜底）
@@ -311,17 +312,39 @@ export function detectFalseFileClaim(result: any, options: GroundingOptions = {}
 /** 纠偏文案：只写正向动作 + 可直接复制的调用块，不写否定句、不点名禁止物。 */
 export function groundingNudge(targets: string[], protocol?: ToolProtocolId): string {
   const target = targets[0]
-  const hint =
-    protocol === 'managed_xml'
-      ? '<tool_call>{"name":"write","arguments":{"path":"…","content":"…"}}</tool_call>'
-      : '[function_calls][call:write]{"path":"…","content":"…"}[/call][/function_calls]'
+  // 16:02 现场：纠偏里写的是 <tool_call>{…}</tool_call>，而托管 XML 协议只认
+  // <tool_calls><invoke …>，模型照抄也解析不出来。示例必须由协议渲染。
+  //
+  // 二进制格式另给一条可直接改的 python 命令：write 是文本写入，写 .xlsx 得到的
+  // 是损坏文件，模型照做也会被打开时报错。
+  const binaryTarget = /\.(xlsx|xls|xlsm|docx|pptx)$/i.test(target ?? '')
+  const hint = binaryTarget
+    ? renderCallExample(
+        'pwsh',
+        {
+          command: `python -c "from openpyxl import Workbook;wb=Workbook();ws=wb.active;ws.append(['列1','列2']);wb.save(r'${target}')"`,
+          description: '用 openpyxl 生成 Excel 文件',
+        },
+        protocol,
+      )
+    : renderCallExample(
+        'write',
+        { path: target ?? '<目标文件的绝对路径>', content: '<表格内容>' },
+        protocol,
+      )
   const lines = [
-    '（系统纠偏，不是用户提问）目标文件还没落地，请现在调用工具把它真实写出来。',
+    '（系统纠偏，不是用户提问）你上一轮回复说文件已经生成，但磁盘上这个路径此刻不存在。',
   ]
   if (target) lines.push(`目标路径：${target}`)
   lines.push(
-    '内容较多时可以分段落盘：先用 write 建文件并写入第一段，再用 pwsh 追加后续段落，不必一次生成全部内容。',
-    '写完用 pwsh 列一次目标目录确认文件存在，然后回报真实路径。',
+    '原因不是权限或沙箱：shell 与文件工具在同一台机器、同一个文件系统上，写工作区是允许的。上一轮只是没有真正发出写文件的调用。',
+    '这一轮不要重述表格内容、不要解释流程，只输出一个工具调用块，把内容写进目标文件。',
+    // write 是文本写入：直接写 .xlsx/.docx 会得到损坏文件，打开即报错。
+    // 必须走 python 生成真正的二进制工作簿。
+    '目标若是 .xlsx/.xls/.docx 这类二进制格式，用 shell 调用 python 生成（Excel 用 openpyxl，Word 用 python-docx），不要用 write 把文本直接写进去——那样文件打开会报错。',
+    '路径含空格或中文时用引号包住整个路径。',
+    '内容较多可以分段：先建工作簿并写入表头与前几行，再用 shell 追加后续行，不必一次生成全部。',
+    '写完用 shell 列一次目标目录确认文件存在，再回报真实路径。',
     '调用格式：',
     hint,
   )

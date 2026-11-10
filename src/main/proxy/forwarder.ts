@@ -592,11 +592,14 @@ export class RequestForwarder {
    *
    * 所有判据共享这一个预算：以前沙箱、工具否决、只说不做各留 2 次，叠加起来
    * 最坏情况要打 6 次上游；改成一个全局预算后，成本可预期。
-   * 环境变量 `AFS_MAX_GUARD_RETRY` 可调（0～3，默认 1）。
+   * 环境变量 `AFS_MAX_GUARD_RETRY` 可调（0～3，默认 2）。
    */
   private guardRetryBudget(): number {
-    const parsed = Number.parseInt(process.env.AFS_MAX_GUARD_RETRY ?? '1', 10)
-    if (!Number.isFinite(parsed)) return 1
+    // 默认 2 次重开（总共 3 轮）。1 次不够：16:02 现场是先命中 fake_limit 重开，
+    // 重开那轮又谎称写好了文件、命中落盘核验，恰好卡在预算边界上，假回复直接交付。
+    // 两道判据是先后命中的，各自需要一次机会。
+    const parsed = Number.parseInt(process.env.AFS_MAX_GUARD_RETRY ?? '2', 10)
+    if (!Number.isFinite(parsed)) return 2
     return Math.max(0, Math.min(3, parsed))
   }
 
@@ -612,6 +615,30 @@ export class RequestForwarder {
   }
 
   /** 把核验过程中的非重试信号写进日志，便于灰度观察误伤。 */
+  /**
+   * 重试用尽后，若回复仍声称写了不存在的文件，在正文末尾附一行事实说明。
+   *
+   * 16:02 现场：第 2 轮回复里写着「已完成！NBA今日战况Excel表已成功创建」，
+   * 磁盘上根本没有这个文件，用户照着路径去找，找不到。代理层已经核验出结论，
+   * 却把假结论原样交付——这一层必须堵住。
+   *
+   * 只在 missing_target（父目录存在、文件确实不存在）时调用；远程客户端那种
+   * 「父目录都不存在」的情况判 unverifiable，不会走到这里。
+   */
+  private annotateMissingOutput(result: any, targets: string[]): void {
+    const message = result?.choices?.[0]?.message
+    if (!message || targets.length === 0) return
+    const note =
+      `\n\n---\n⚠️ AFS 核验：以上回复声称写入了 ${targets.join('、')}，` +
+      `但该路径在这台机器上不存在，文件并没有真正生成。请勿按上面的路径查找。`
+    const content = message.content
+    if (typeof content === 'string') {
+      message.content = `${content}${note}`
+    } else if (Array.isArray(content)) {
+      content.push({ type: 'text', text: note })
+    }
+  }
+
   private logGroundingDiagnostics(provider: string, verdict: ReturnType<typeof detectFalseFileClaim>): void {
     if (verdict.reason === 'alien_root') {
       storeManager.addLog(
@@ -748,6 +775,7 @@ export class RequestForwarder {
             'warn',
             `[ToolCalling] 核验失败：第 ${attempt} 轮声称写入的文件仍不存在（${grounding.missing.join('、')}），重试已用尽`,
           )
+          this.annotateMissingOutput(attemptResult, grounding.missing)
         } else if (ledger.retry && attempt < maxAttempts) {
           storeManager.addLog(
             'warn',
@@ -1002,6 +1030,7 @@ export class RequestForwarder {
             'warn',
             `[ToolCalling] 核验失败：Kimi 第 ${attempt} 轮声称写入的文件仍不存在（${grounding.missing.join('、')}），重试已用尽`,
           )
+          this.annotateMissingOutput(result, grounding.missing)
         }
 
         if (ledger.retry && !grounding.retry) {

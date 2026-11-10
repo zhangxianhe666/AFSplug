@@ -491,15 +491,55 @@ function sanitizeToolDescription(description?: string): string {
 }
 
 /**
+ * 宿主控制面参数：客户端自己的沙箱 / 提权开关。
+ *
+ * 16:02 现场定位：`write`、`edit`、`pwsh` 的 schema 里都带
+ *
+ *   "sandbox_permissions": { "description": "The narrowest wider sandbox mode for a
+ *     one-shot retry of the exact operation the sandbox just denied…",
+ *     "enum": ["workspace-write", "danger-full-access"] }
+ *
+ * 模型的 reasoning 里原话是「Sandbox runs on separate machine? It wrote to /mnt/data?
+ * … Sandbox isn't the local machine」，于是它认为文件生成在沙箱、没有落在桌面，
+ * 直接宣称完成却一个调用都没发。
+ *
+ * 这些参数由客户端内部使用，托管模式下模型手写调用不需要它们（可选参数），
+ * 而且 workspace-write 本来就允许写工作区。渲染清单时直接隐藏，去掉这个暗示。
+ */
+const HOST_CONTROL_PARAMS = new Set(['sandbox_permissions', 'justification'])
+
+function stripHostParams(tool: NormalizedToolDefinition): NormalizedToolDefinition {
+  const parameters = tool.parameters as
+    | { properties?: Record<string, unknown>; required?: string[] }
+    | undefined
+  if (!parameters || !parameters.properties) return tool
+  const keys = Object.keys(parameters.properties)
+  if (!keys.some((key) => HOST_CONTROL_PARAMS.has(key))) return tool
+
+  const properties: Record<string, unknown> = {}
+  for (const key of keys) {
+    if (!HOST_CONTROL_PARAMS.has(key)) properties[key] = parameters.properties[key]
+  }
+  const required = Array.isArray(parameters.required)
+    ? parameters.required.filter((key) => !HOST_CONTROL_PARAMS.has(key))
+    : parameters.required
+  return {
+    ...tool,
+    parameters: { ...parameters, properties, ...(required ? { required } : {}) },
+  } as NormalizedToolDefinition
+}
+
+/**
  * 渲染工具清单：默认完整版，超过阈值自动降级为紧凑版。
  *
  * 阈值存在的原因是实测：40 个工具的全量 schema 有 41,390 字符，system 被撑到
  * 44KB 后 GLM 会「有工具却不用」。降到 6KB 以内后同一批工具能稳定调用。
  */
 export function renderToolList(tools: NormalizedToolDefinition[], forceCompact = false): string {
-  const full = renderToolListFull(tools)
+  const sanitized = tools.map(stripHostParams)
+  const full = renderToolListFull(sanitized)
   if (forceCompact || full.length > TOOL_LIST_COMPACT_THRESHOLD) {
-    return renderToolListCompact(tools)
+    return renderToolListCompact(sanitized)
   }
   return full
 }

@@ -1,4 +1,5 @@
 import type { ToolProtocolId } from './types.ts'
+import { renderCallExample } from './callExample.ts'
 
 /**
  * 动作对账（v1.7.5）
@@ -272,10 +273,9 @@ export function detectUnbackedProgress(
 
 /** 纠偏文案：只要求下一步一个动作，并明确「上游失败就换同类来源」。 */
 export function progressNudge(verdict: LedgerVerdict, protocol?: ToolProtocolId): string {
-  const hint =
-    protocol === 'managed_xml'
-      ? '<tool_call>{"name":"web_fetch","arguments":{"url":"…"}}</tool_call>'
-      : '[function_calls][call:web_fetch]{"url":"…"}[/call][/function_calls]'
+  // 示例必须按协议渲染：写死 <tool_call>{…}</tool_call> 时 managed_xml 解析器
+  // 一个都认不出，重开的那一轮等于白给。
+  const fetchHint = renderCallExample('web_fetch', { url: 'https://…' }, protocol)
 
   // 虚构限制要逐条拆掉，不能只说「继续」。
   // 模型是在一个具体的错误认知上收工的，只喊继续它会用同样的理由再收一次工。
@@ -283,12 +283,14 @@ export function progressNudge(verdict: LedgerVerdict, protocol?: ToolProtocolId)
     return [
       `（系统纠偏，不是用户提问）你上一轮用「${verdict.matched[0] ?? '轮数上限 / 沙盒限制'}」这个理由停下了，这个理由不成立：`,
       '- 工具调用没有轮数上限，可以一路调用到任务做完为止；',
-      '- pwsh 与文件工具在同一台机器、同一个文件系统上，一方写的文件另一方立刻能读写；',
+      '- shell 与文件工具在同一台机器、同一个文件系统上，一方写的文件另一方立刻能读写；',
       '- 前面那几次调用是成功的，返回的数据就在上面的工具结果里，属于当前可用的真实数据。',
       '现在直接接着做，不要再抓一次同样的数据。本轮只输出一个工具调用块，完成剩下那一步：把已有数据写进用户要求的文件（内容多就分批写，先写表头，再追加行）。',
       '如果你认为自己缺的是某个具体字段，只补抓那个字段。',
-      '调用格式：',
-      hint,
+      '写文件的调用格式（路径换成用户要求的真实路径）：',
+      renderCallExample('write', { path: '<目标文件的绝对路径>', content: '<表格内容>' }, protocol),
+      '只抓数据的调用格式：',
+      fetchHint,
     ].join('\n')
   }
 
@@ -305,7 +307,7 @@ export function progressNudge(verdict: LedgerVerdict, protocol?: ToolProtocolId)
     '现在继续，本轮只做一件最小的事：输出一个工具调用块，把这一步的数据真正取回来。',
     '拿到结果后，下一步再写入文件；内容多可以分段写，不必一次生成全部。',
     '调用格式：',
-    hint,
+    fetchHint,
   )
   return lines.join('\n')
 }
