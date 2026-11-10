@@ -32,6 +32,7 @@ import {
   toolRefusalNudge,
 } from './toolCalling/hallucinationGuard'
 import { detectFalseFileClaim, groundingNudge } from './toolCalling/grounding'
+import { detectUnbackedProgress, progressNudge } from './toolCalling/actionLedger'
 import type { ToolCallingTransformResult } from './toolCalling/types'
 import { sessionManager } from './sessionManager'
 import {
@@ -709,6 +710,11 @@ export class RequestForwarder {
 
         // 先做客观核验：声称写了文件但文件不存在，是唯一允许直接触发重开的判据。
         const grounding = detectFalseFileClaim(attemptResult, { messages: transformed.messages })
+        // 动作对账：声称「已获取数据」但账本里没有一次成功调用，或失败了就收工。
+        const ledger = detectUnbackedProgress(attemptResult, transformed.plan, {
+          messages: transformed.messages,
+          userText: lastUserText(transformed.messages),
+        })
         // 话术类判定降级为诊断，不再各自决定重试。
         const sandbox = detectSandboxHallucination(
           attemptResult,
@@ -733,6 +739,22 @@ export class RequestForwarder {
           storeManager.addLog(
             'warn',
             `[ToolCalling] 核验失败：第 ${attempt} 轮声称写入的文件仍不存在（${grounding.missing.join('、')}），重试已用尽`,
+          )
+        } else if (ledger.retry && attempt < maxAttempts) {
+          storeManager.addLog(
+            'warn',
+            `[ToolCalling] 核验失败：GLM 第 ${attempt} 轮${
+              ledger.reason === 'unbacked_claim'
+                ? `声称已获取数据（${ledger.matched[0] ?? ''}）但成功调用数为 0`
+                : '工具失败后直接收工'
+            }，作废一轮重开（带纠偏提示）`,
+          )
+          retryHint = progressNudge(ledger, transformed.plan.protocol)
+          continue
+        } else if (ledger.retry) {
+          storeManager.addLog(
+            'warn',
+            `[ToolCalling] 核验失败：第 ${attempt} 轮仍未真正取到数据（${ledger.reason}），重试已用尽`,
           )
         } else if (sandbox.retry) {
           if (this.phraseRetryEnabled() && attempt < maxAttempts) {
@@ -932,6 +954,11 @@ export class RequestForwarder {
         const userText = lastUserText(transformed.messages)
         // 客观核验优先：文件到底在不在，与它用什么措辞无关。
         const grounding = detectFalseFileClaim(result, { messages: transformed.messages })
+        // 动作对账：正文说「已获取」但账本里没有成功调用，或失败了就收工。
+        const ledger = detectUnbackedProgress(result, transformed.plan, {
+          messages: transformed.messages,
+          userText,
+        })
         // 话术类判定保留为诊断信号，默认不再触发重试。
         const refusal = detectToolRefusal(result, transformed.plan, userText)
         const planOnly = refusal.retry ? refusal : detectPlanOnlyTurn(result, transformed.plan, userText)
@@ -961,7 +988,29 @@ export class RequestForwarder {
           )
         }
 
-        if (phraseFailure && !grounding.retry) {
+        if (ledger.retry && !grounding.retry) {
+          if (attempt < maxAttempts) {
+            storeManager.addLog(
+              'warn',
+              `[ToolCalling] 核验失败：Kimi 第 ${attempt} 轮${
+                ledger.reason === 'unbacked_claim'
+                  ? `声称已获取数据（${ledger.matched[0] ?? ''}）但成功调用数为 0`
+                  : '工具失败后直接收工'
+              }，作废一轮重开（带纠偏提示）`,
+            )
+            nudge = progressNudge(ledger, transformed.plan.protocol)
+            if (shouldDeleteSession() && convId) {
+              await adapter.deleteConversation(convId).catch(() => {})
+            }
+            continue
+          }
+          storeManager.addLog(
+            'warn',
+            `[ToolCalling] 核验失败：Kimi 第 ${attempt} 轮仍未真正取到数据（${ledger.reason}），重试已用尽`,
+          )
+        }
+
+        if (phraseFailure && !grounding.retry && !ledger.retry) {
           if (this.phraseRetryEnabled() && attempt < maxAttempts) {
             storeManager.addLog(
               'warn',
