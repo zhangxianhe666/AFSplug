@@ -26,14 +26,12 @@ import {
   detectPlanOnlyTurn,
   detectSandboxHallucination,
   detectToolRefusal,
-  isPlanOnlyRetryEnabled,
-  isSandboxRetryEnabled,
-  isToolRefusalRetryEnabled,
   lastUserText,
   planOnlyNudge,
   sandboxNudge,
   toolRefusalNudge,
 } from './toolCalling/hallucinationGuard'
+import { detectFalseFileClaim, groundingNudge } from './toolCalling/grounding'
 import type { ToolCallingTransformResult } from './toolCalling/types'
 import { sessionManager } from './sessionManager'
 import {
@@ -588,6 +586,54 @@ export class RequestForwarder {
    * 于是把 /mnt/data 这类沙箱目录当成用户工作区报出来。这一轮的标志是「一个工具
    * 调用都没有 + 正文命中沙箱痕迹」，作废后重开一次。
    */
+  /**
+   * 单个请求允许的兜底重开次数。
+   *
+   * 所有判据共享这一个预算：以前沙箱、工具否决、只说不做各留 2 次，叠加起来
+   * 最坏情况要打 6 次上游；改成一个全局预算后，成本可预期。
+   * 环境变量 `AFS_MAX_GUARD_RETRY` 可调（0～3，默认 1）。
+   */
+  private guardRetryBudget(): number {
+    const parsed = Number.parseInt(process.env.AFS_MAX_GUARD_RETRY ?? '1', 10)
+    if (!Number.isFinite(parsed)) return 1
+    return Math.max(0, Math.min(3, parsed))
+  }
+
+  /**
+   * 话术类判据是否允许触发重试。
+   *
+   * 默认关闭：话术是开放集合，扩一条就漏一条，实测「识别 + 重试」在复杂任务上
+   * 最高只有 25% 命中率，而且纠偏消息本身会逼出新的失败话术（实测逼出
+   * 「我只有 open_url」）。现在它们只产出诊断日志，重试只由客观核验决定。
+   */
+  private phraseRetryEnabled(): boolean {
+    return process.env.AFS_PHRASE_RETRY === '1'
+  }
+
+  /** 把核验过程中的非重试信号写进日志，便于灰度观察误伤。 */
+  private logGroundingDiagnostics(provider: string, verdict: ReturnType<typeof detectFalseFileClaim>): void {
+    if (verdict.reason === 'alien_root') {
+      storeManager.addLog(
+        'info',
+        `[ToolCalling] 诊断：${provider} 本轮提到本机不存在的路径根（${verdict.alien.join('、')}），未重试`,
+      )
+      return
+    }
+    if (verdict.reason === 'unverifiable') {
+      storeManager.addLog(
+        'info',
+        `[ToolCalling] 诊断：${provider} 声称写入 ${verdict.targets.join('、')}，但父目录不存在，无法核验，未重试`,
+      )
+      return
+    }
+    if (verdict.stale.length > 0) {
+      storeManager.addLog(
+        'info',
+        `[ToolCalling] 诊断：${provider} 声称写入的文件已存在但修改时间偏旧（${verdict.stale.join('、')}），按幂等放行`,
+      )
+    }
+  }
+
   private async forwardGLM(
     request: ChatCompletionRequest,
     account: Account,
@@ -596,19 +642,19 @@ export class RequestForwarder {
     startTime: number
   ): Promise<ForwardResult> {
     try {
-      const maxAttempts = isSandboxRetryEnabled() ? 2 : 1
+      const maxAttempts = 1 + this.guardRetryBudget()
       const adapter = new GLMAdapter(provider, account)
       let lastResponse: any = null
       let result: any = null
       let handler: GLMStreamHandler | null = null
-      let sandboxHint: string | null = null
+      let retryHint: string | null = null
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         const transformed = this.transformRequestForPromptToolUse(request, provider)
         const transformedRequest = {
           ...request,
-          messages: sandboxHint
-            ? [...transformed.messages, { role: 'user' as const, content: sandboxHint }]
+          messages: retryHint
+            ? [...transformed.messages, { role: 'user' as const, content: retryHint }]
             : transformed.messages,
           tools: transformed.tools,
         }
@@ -661,7 +707,10 @@ export class RequestForwarder {
 
         this.applyToolCallsToResponse(attemptResult, transformed)
 
-        const verdict = detectSandboxHallucination(
+        // 先做客观核验：声称写了文件但文件不存在，是唯一允许直接触发重开的判据。
+        const grounding = detectFalseFileClaim(attemptResult, { messages: transformed.messages })
+        // 话术类判定降级为诊断，不再各自决定重试。
+        const sandbox = detectSandboxHallucination(
           attemptResult,
           transformed.plan,
           lastUserText(transformed.messages),
@@ -672,19 +721,34 @@ export class RequestForwarder {
           await adapter.deleteConversation(convId)
         }
 
-        if (verdict.retry) {
+        if (grounding.retry) {
           if (attempt < maxAttempts) {
             storeManager.addLog(
               'warn',
-              `[ToolCalling] 命中沙箱幻觉（${verdict.matched.join('/')}），第 ${attempt} 轮作废，重开一轮（带纠偏提示）`,
+              `[ToolCalling] 核验失败：GLM 声称写入 ${grounding.missing.join('、')} 但文件不存在，第 ${attempt} 轮作废，重开一轮（带纠偏提示）`,
             )
-            sandboxHint = sandboxNudge(transformed.plan.protocol)
+            retryHint = groundingNudge(grounding.missing, transformed.plan.protocol)
             continue
           }
           storeManager.addLog(
             'warn',
-            `[ToolCalling] 第 ${attempt} 轮仍是沙箱幻觉（${verdict.matched.join('/')}），重试已用尽`,
+            `[ToolCalling] 核验失败：第 ${attempt} 轮声称写入的文件仍不存在（${grounding.missing.join('、')}），重试已用尽`,
           )
+        } else if (sandbox.retry) {
+          if (this.phraseRetryEnabled() && attempt < maxAttempts) {
+            storeManager.addLog(
+              'warn',
+              `[ToolCalling] 命中沙箱幻觉（${sandbox.matched.join('/')}），第 ${attempt} 轮作废，重开一轮（话术判定，AFS_PHRASE_RETRY=1）`,
+            )
+            retryHint = sandboxNudge(transformed.plan.protocol)
+            continue
+          }
+          storeManager.addLog(
+            'info',
+            `[ToolCalling] 诊断：GLM 本轮疑似沙箱幻觉（${sandbox.matched.join('/')}），仅记录不重试`,
+          )
+        } else {
+          this.logGroundingDiagnostics('GLM', grounding)
         }
 
         lastResponse = response
@@ -752,7 +816,7 @@ export class RequestForwarder {
       // 一旦吐字就收不回来——所以托管模式下先收完整轮、判定后再决定输出（非托管
       // 请求保持原来的直通流式，不加延迟）。
       const managed = transformed.plan.mode === 'managed' && transformed.plan.shouldParseResponse
-      const maxAttempts = managed && (isToolRefusalRetryEnabled() || isPlanOnlyRetryEnabled()) ? 2 : 1
+      const maxAttempts = managed ? 1 + this.guardRetryBudget() : 1
       const latencyBase = startTime
 
       if (!managed) {
@@ -866,36 +930,56 @@ export class RequestForwarder {
         this.applyToolCallsToResponse(result, transformed)
 
         const userText = lastUserText(transformed.messages)
+        // 客观核验优先：文件到底在不在，与它用什么措辞无关。
+        const grounding = detectFalseFileClaim(result, { messages: transformed.messages })
+        // 话术类判定保留为诊断信号，默认不再触发重试。
         const refusal = detectToolRefusal(result, transformed.plan, userText)
         const planOnly = refusal.retry ? refusal : detectPlanOnlyTurn(result, transformed.plan, userText)
-        const failure = planOnly.retry ? planOnly : null
+        const phraseFailure = planOnly.retry ? planOnly : null
         const reasonText =
-          failure?.reason === 'plan_only'
-            ? `只说了计划没动手（${failure.matched.join('/')}）`
-            : `把问题推回给用户、没调工具（${failure?.matched.join('/') ?? ''}）`
+          phraseFailure?.reason === 'plan_only'
+            ? `只说了计划没动手（${phraseFailure.matched.join('/')}）`
+            : `把问题推回给用户、没调工具（${phraseFailure?.matched.join('/') ?? ''}）`
         const convId = handler.getConversationId()
 
-        if (failure && attempt < maxAttempts) {
+        if (grounding.retry && attempt < maxAttempts) {
           storeManager.addLog(
             'warn',
-            `[ToolCalling] Kimi 本轮${reasonText}，第 ${attempt} 轮作废，重开一轮（带纠偏提示）`,
+            `[ToolCalling] 核验失败：Kimi 声称写入 ${grounding.missing.join('、')} 但文件不存在，第 ${attempt} 轮作废，重开一轮（带纠偏提示）`,
           )
-          nudge =
-            failure.reason === 'plan_only'
-              ? planOnlyNudge(transformed.plan.protocol)
-              : toolRefusalNudge(transformed.plan.protocol)
+          nudge = groundingNudge(grounding.missing, transformed.plan.protocol)
           if (shouldDeleteSession() && convId) {
             await adapter.deleteConversation(convId).catch(() => {})
           }
           continue
         }
 
-        if (failure) {
+        if (grounding.retry) {
           storeManager.addLog(
             'warn',
-            `[ToolCalling] Kimi 第 ${attempt} 轮仍${reasonText}，重试已用尽`,
+            `[ToolCalling] 核验失败：Kimi 第 ${attempt} 轮声称写入的文件仍不存在（${grounding.missing.join('、')}），重试已用尽`,
           )
         }
+
+        if (phraseFailure && !grounding.retry) {
+          if (this.phraseRetryEnabled() && attempt < maxAttempts) {
+            storeManager.addLog(
+              'warn',
+              `[ToolCalling] Kimi 本轮${reasonText}，第 ${attempt} 轮作废，重开一轮（话术判定，AFS_PHRASE_RETRY=1）`,
+            )
+            nudge =
+              phraseFailure.reason === 'plan_only'
+                ? planOnlyNudge(transformed.plan.protocol)
+                : toolRefusalNudge(transformed.plan.protocol)
+            if (shouldDeleteSession() && convId) {
+              await adapter.deleteConversation(convId).catch(() => {})
+            }
+            continue
+          }
+          storeManager.addLog('info', `[ToolCalling] 诊断：Kimi 本轮${reasonText}，仅记录不重试`)
+        }
+
+        this.logGroundingDiagnostics('Kimi', grounding)
 
         finalResult = result
         finalHandler = handler
