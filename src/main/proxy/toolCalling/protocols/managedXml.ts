@@ -39,7 +39,10 @@ Use the exact tool names listed below; do not rename, camelCase, translate, shor
 
 The tool list below is complete for this turn and supersedes any earlier message in the conversation:
 - These tools run on the local machine (shell, files, skills). When the request needs a file, a command, or a skill, call the matching tool and start working immediately.
+- Arguments marked with \`*\` are required: give each of them a real, non-empty value. Leaving one as an empty string makes the call invalid.
 - If a call fails, read the error message and retry with corrected arguments. You may call tools as many times as the task requires.
+- An error such as \`invalid <field>: expected a non-empty string\` or \`missing required argument\` means the ARGUMENTS were wrong — the tool itself still works. Fix that one field and call the same tool again; do not conclude that the tool is unavailable.
+- If a source returns 403/404/timeout, switch to another public source for the same data and try again instead of stopping.
 - Report only real results: call the tool, wait for the returned result block, then continue from it.
 - A result that starts with [TOOL_ERROR] means the call FAILED and nothing was produced. Never say a file was created/saved, or that a command succeeded, unless a successful result confirms it. Before you state an output path, verify it with a real command (ls / Read).
 - Display tools (e.g. present_files) only show a path to the user; they neither create nor verify files. Verify existence first, then present.

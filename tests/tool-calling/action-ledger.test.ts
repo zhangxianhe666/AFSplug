@@ -100,6 +100,47 @@ test('失败后自述未完成 → 判 gave_up 重开', () => {
   assert.equal(verdict.reason, 'gave_up')
 })
 
+test('用户只说「继续」时仍按任务型判定（历史里有任务）', () => {
+  const result = reply('抱歉，本次任务未能完成，接口返回内容被截断。')
+  const verdict = detectUnbackedProgress(result, plan, {
+    messages: [
+      { role: 'user', content: TASK },
+      toolMsg('Fetched https://www.nba.com/games (HTTP 403) Access Denied'),
+      { role: 'user', content: '继续' },
+    ],
+    userText: '继续',
+  })
+  assert.equal(verdict.retry, true)
+  assert.equal(verdict.reason, 'gave_up')
+})
+
+test('账本读不到 role=tool（客户端换了包装）也能判 gave_up', () => {
+  const result = reply('本次任务未能完成：目标站点拒绝访问，没有拿到数据。')
+  const verdict = detectUnbackedProgress(result, plan, {
+    messages: [{ role: 'user', content: TASK }, { role: 'user', content: '[工具结果] HTTP 403' }],
+    userText: TASK,
+  })
+  assert.equal(verdict.retry, true)
+  assert.equal(verdict.reason, 'gave_up')
+  assert.equal(verdict.okCount, 0)
+})
+
+test('「成功连上 / 拿到了」也算完成态断言', () => {
+  assert.ok(findFetchClaims('转用 ESPN 公开数据接口成功连上，拿到了赛程日历。').length > 0)
+})
+
+test('已有成功调用时，正文里的道歉不算空转', () => {
+  const result = reply('抱歉，Excel 写入这一步还没成功。')
+  const verdict = detectUnbackedProgress(result, plan, {
+    messages: [
+      { role: 'user', content: TASK },
+      toolMsg('Fetched https://www.espn.com/nba/scoreboard (HTTP 200) NBA Scoreboard ...'),
+    ],
+    userText: TASK,
+  })
+  assert.equal(verdict.retry, false)
+})
+
 // ── 不应误伤的边界 ──────────────────────────────────────────────────────────
 
 test('真的调了工具时不判定', () => {

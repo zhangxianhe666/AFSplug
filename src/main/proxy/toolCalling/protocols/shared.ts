@@ -432,6 +432,10 @@ function renderToolListFull(tools: NormalizedToolDefinition[]): string {
  *
  * 保留工具名与参数名（模型调用真正需要的部分），丢掉完整 JSON schema 与冗长
  * 描述。40 个工具可压到 4~6KB，同时把 system 预算还给客户端自己的指令。
+ *
+ * 必填参数标 `*` 而不是裸写参数名：紧凑版没有 schema，模型分不清哪些参数必填，
+ * 实测会给出 `description: ""` 这类空值，被客户端判为非法调用（invalid description:
+ * expected a non-empty string），随后模型把「参数填错」误读成「工具不可用」。
  */
 function renderToolListCompact(tools: NormalizedToolDefinition[]): string {
   return tools
@@ -441,7 +445,7 @@ function renderToolListCompact(tools: NormalizedToolDefinition[]): string {
         ? (tool.parameters?.required as string[])
         : []
       const args = Object.keys(properties)
-        .map((name) => (required.includes(name) ? name : `${name}?`))
+        .map((name) => (required.includes(name) ? `${name}*` : `${name}?`))
         .join(', ')
       const description = sanitizeToolDescription(tool.description)
       const shortDescription =

@@ -10,6 +10,7 @@ import { getToolClientAdapter } from './clientAdapters/index.ts'
 import { defuseSystemUrls, rewriteUserUrls } from './linkPolicy.ts'
 import { detectAuthFailedTools, partitionDisabledTools, resolveToolPolicy } from './toolPolicy.ts'
 import { buildToolCallingRuntimePlan } from './runtimePlan.ts'
+import { trimToolResults } from './toolBudget.ts'
 import type { NormalizedClientToolRequest } from './clientAdapters/types.ts'
 import type { NormalizedToolDefinition, ToolCallingPlan, ToolCallingTransformResult, ToolProtocolId } from './types.ts'
 
@@ -72,9 +73,17 @@ export class ToolCallingEngine {
       Math.min(SYSTEM_TRIM_MAX_CHARS, SYSTEM_TOTAL_BUDGET - prompt.length),
     )
     const trimmed = trimSystemMessages(request.messages, clientBudget)
+    // 工具结果按预算裁剪：整页 HTML/JSON 能一轮把上下文撑到 26K，上游随即空响应。
+    // 放在 system 裁剪之后、注入之前，只影响发给上游的副本。
+    const budgeted = trimToolResults(trimmed)
+    if (budgeted.trimmed > 0) {
+      this.log(
+        `[ToolCalling] 已裁剪工具结果 ${budgeted.trimmed} 条，省下 ${budgeted.saved} 字符`,
+      )
+    }
     // 摘掉 system 里的裸链接：GLM 见到 URL 会切到"只有 open_url"的网页助手人格
     // （见 URL_DEFUSE_PROVIDERS 注释的对照实验）。
-    const defused = defuseSystemUrls(trimmed, provider.id, (message) => this.log(message))
+    const defused = defuseSystemUrls(budgeted.messages, provider.id, (message) => this.log(message))
     // user 侧链接剥掉 scheme（见 linkPolicy.ts 的对照实验）。指引里点名 WebFetch 的
     // 前提是这一轮确实有该工具，否则会指向不存在的工具名——所以工具名要做归一化
     // 匹配：dsh 叫 web_fetch、Claude 叫 WebFetch、还有客户端叫 fetch_url。

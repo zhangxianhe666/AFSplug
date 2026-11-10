@@ -75,7 +75,11 @@ const FAILURE_PATTERN =
 const FETCH_CLAIM_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
   { label: 'obtained', pattern: /已(?:经)?(?:成功)?(?:获取|获得|拿到|取到|查到|拉取到|抓取到)/ },
   { label: 'via_tool', pattern: /已(?:经)?(?:通过|用|使用)[^\n。；;]{0,18}?(?:抓取|获取|拉取|读取|查到|成功)/ },
-  { label: 'success_verb', pattern: /(?:成功|已)(?:获取|抓取|拉取|查到|读取|访问)(?:到|了|成功)?/ },
+  { label: 'success_verb', pattern: /(?:成功|已)(?:获取|抓取|拉取|查到|读取|访问|连上)(?:到|了|成功)?/ },
+  // 「拿到了」「已经连上」「成功拿到」——都是同一件事的口语说法，缺了它们
+  // 模型换个动词就能绕过对账。
+  { label: 'got_it', pattern: /(?:拿到|取到|抓到)了/ },
+  { label: 'connected', pattern: /(?:成功|能|可以)(?:连上|连通|访问)/ },
 ]
 
 /** 断言窗口内出现这些词，说明是否定/未完成语境，不当作「已完成」。 */
@@ -83,7 +87,7 @@ const CLAIM_NEGATION = /(?:尚未|未能|没有|没能|无法|失败|不成功|�
 
 /** 用户这一轮在要产出（而不是问概念）。 */
 const TASK_REQUEST =
-  /(抓取|获取|查询|搜索|整理|汇总|写入|写进|保存|导出|新建|创建|生成|制作|做一|帮我|跑一下|运行|下载|爬|fetch|scrape|write|save|create|export|generate|download)/i
+  /(抓取|获取|查询|搜索|整理|汇总|写入|写进|保存|导出|新建|创建|生成|制作|做一|帮我|跑一下|运行|下载|爬|fetch|scrape|write|save|create|export|generate|download|继续|接着|下一步|往下|go on|continue)/i
 
 /** 正文自述「没做完」。 */
 const GIVE_UP_PATTERN =
@@ -141,6 +145,27 @@ export function findFetchClaims(text: string): string[] {
   return Array.from(new Set(claims)).slice(0, 3)
 }
 
+/**
+ * 最近几条 user 消息拼成的任务上下文。
+ *
+ * 工具失败后客户端常常只发一句「继续」，此时只看最后一条 user 消息会判成
+ * 「不是任务型请求」直接放行——15:05 那次就是这么漏掉的。
+ */
+export function collectUserContext(
+  messages?: Array<{ role?: string; content?: unknown }>,
+  limit = 3,
+): string {
+  if (!Array.isArray(messages)) return ''
+  const texts: string[] = []
+  for (let i = messages.length - 1; i >= 0 && texts.length < limit; i--) {
+    const message = messages[i]
+    if (!message || (message.role !== 'user' && message.role !== 'human')) continue
+    const text = textOf(message.content).trim()
+    if (text) texts.push(text)
+  }
+  return texts.reverse().join('\n')
+}
+
 function verdict(
   retry: boolean,
   reason: LedgerReason,
@@ -175,8 +200,10 @@ export function detectUnbackedProgress(
   const text = assistantText(result)
   if (!text.trim()) return verdict(false, 'no_text')
 
-  const userText = options.userText ?? ''
-  if (!TASK_REQUEST.test(userText)) return verdict(false, 'not_task')
+  // 任务上下文 = 最后一条 user + 最近几条历史 user。工具失败后客户端往往只发
+  // 一句「继续」，只看最后一条会判成闲聊，判据静默失效。
+  const userContext = `${options.userText ?? ''}\n${collectUserContext(options.messages)}`
+  if (!TASK_REQUEST.test(userContext)) return verdict(false, 'not_task')
 
   const results = collectToolResults(options.messages)
   const okCount = results.filter((item) => item.ok).length
@@ -190,13 +217,16 @@ export function detectUnbackedProgress(
     return verdict(true, 'unbacked_claim', { ...stats, matched: claims })
   }
 
-  // 没有「已获取」类断言，但上一次调用是失败的、正文自述没做完 → 失败即收工。
-  if (lastFailure && GIVE_UP_PATTERN.test(text)) {
+  // 没有「已获取」类断言，但正文自述没做完 → 失败即收工。
+  //
+  // 不再要求「账本里必须有一条失败记录」：工具结果的 messages 形态由客户端决定
+  // （有的客户端把结果包成 role=tool，有的塞进 user），账本读空时如果还要求
+  // lastFailure，判据就会在真实会话里静默失效——15:03 那次正是如此。
+  // 只要「这一轮零调用 + 任务型请求 + 自述未完成」，就是空转回合。
+  const stalled = lastFailure !== null || okCount === 0
+  if (stalled && GIVE_UP_PATTERN.test(text)) {
     return verdict(true, 'gave_up', { ...stats, matched: [text.slice(-80)] })
   }
-
-  // 账本全空且没有任何断言：模型可能只是回了一句解释，交给客户端判断，不在这里重开。
-  if (okCount === 0 && failures.length === 0) return verdict(false, 'no_claim', stats)
 
   return verdict(false, 'no_claim', stats)
 }
@@ -207,7 +237,11 @@ export function progressNudge(verdict: LedgerVerdict, protocol?: ToolProtocolId)
     protocol === 'managed_xml'
       ? '<tool_call>{"name":"web_fetch","arguments":{"url":"…"}}</tool_call>'
       : '[function_calls][call:web_fetch]{"url":"…"}[/call][/function_calls]'
-  const lines = ['（系统纠偏，不是用户提问）上一轮正文里的「已获取 / 已完成」没有对应的成功调用记录，任务还停在这一步。']
+  const lines = [
+    verdict.reason === 'unbacked_claim'
+      ? '（系统纠偏，不是用户提问）上一轮正文里的「已获取 / 已完成」没有对应的成功调用记录，任务还停在这一步。'
+      : '（系统纠偏，不是用户提问）上一轮工具失败后直接停下了，任务还停在这一步，前面的数据仍然有效。',
+  ]
   if (verdict.lastFailure) {
     lines.push(`上一轮的工具结果是这样的失败信息：${verdict.lastFailure.replace(/\s+/g, ' ').slice(0, 160)}`)
     lines.push('这类失败通常是目标站点拒绝直连。换一个同类公开来源或换查询参数，再取一次，通常就能拿到数据。')

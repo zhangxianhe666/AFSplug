@@ -715,6 +715,13 @@ export class RequestForwarder {
           messages: transformed.messages,
           userText: lastUserText(transformed.messages),
         })
+        // 判定结果必须落日志：判据没触发时，只能靠这行区分「没命中」和「没跑」。
+        if (ledger.reason !== 'has_tool_calls') {
+          storeManager.addLog(
+            'info',
+            `[ToolCalling] 对账：GLM ok=${ledger.okCount} fail=${ledger.failCount} reason=${ledger.reason} retry=${ledger.retry}`,
+          )
+        }
         // 话术类判定降级为诊断，不再各自决定重试。
         const sandbox = detectSandboxHallucination(
           attemptResult,
@@ -959,6 +966,12 @@ export class RequestForwarder {
           messages: transformed.messages,
           userText,
         })
+        if (ledger.reason !== 'has_tool_calls') {
+          storeManager.addLog(
+            'info',
+            `[ToolCalling] 对账：Kimi ok=${ledger.okCount} fail=${ledger.failCount} reason=${ledger.reason} retry=${ledger.retry}`,
+          )
+        }
         // 话术类判定保留为诊断信号，默认不再触发重试。
         const refusal = detectToolRefusal(result, transformed.plan, userText)
         const planOnly = refusal.retry ? refusal : detectPlanOnlyTurn(result, transformed.plan, userText)
