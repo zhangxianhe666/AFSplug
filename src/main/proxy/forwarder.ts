@@ -863,7 +863,7 @@ export class RequestForwarder {
           if (turnState.missing.length > 0) {
             this.annotateMissingOutput(attemptResult, turnState.missing)
           }
-          if (turnState.reason === 'undeclared_task') {
+          if (turnState.reason === 'undeclared_task' || turnState.reason === 'leaked_tool_call') {
             this.annotateUnverifiedTurn(attemptResult)
           }
         } else if (ledger.retry && !doneConfirmed && attempt < maxAttempts) {
@@ -1160,7 +1160,9 @@ export class RequestForwarder {
             `[ToolCalling] 三态违约：Kimi 第 ${attempt} 轮仍未按协议收尾（${turnState.reason}），重开次数已用尽`,
           )
           if (turnState.missing.length > 0) this.annotateMissingOutput(result, turnState.missing)
-          if (turnState.reason === 'undeclared_task') this.annotateUnverifiedTurn(result)
+          if (turnState.reason === 'undeclared_task' || turnState.reason === 'leaked_tool_call') {
+            this.annotateUnverifiedTurn(result)
+          }
         }
 
         if (ledger.retry && !grounding.retry && !doneConfirmed && !turnState.retry) {

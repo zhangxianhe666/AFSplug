@@ -58,6 +58,7 @@ export type TurnStateReason =
   | 'blocked_fake_limit'  // [blocked] 但理由是虚构的平台限制 → 违约
   | 'undeclared_task'     // 零调用、无标记、正在任务中途 → 违约
   | 'undeclared_chat'     // 零调用、无标记，但不是任务回合（闲聊/首轮问答）
+  | 'leaked_tool_call'    // 想调工具，但调用块没被解析，整段当正文漏给客户端 → 违约
 
 export interface TurnStateVerdict {
   state: TurnState
@@ -72,6 +73,8 @@ export interface TurnStateVerdict {
   unverifiable: string[]
   /** [blocked] 里命中的虚构限制原文。 */
   fake: string[]
+  /** 正文里未被解析掉的工具调用块原文（leaked_tool_call 时非空）。 */
+  leaked?: string
   /** 是否需要重开一轮。 */
   retry: boolean
 }
@@ -277,6 +280,7 @@ function verdict(
     missing: [],
     unverifiable: [],
     fake: [],
+    leaked: '',
     retry: false,
     ...extra,
   }
@@ -299,6 +303,44 @@ const ARTIFACT_REF =
 
 /** 完成态副词。只有和产物引用同时出现才算断言，单独出现太泛（「已确认」）。 */
 const COMPLETION_ADVERB = /(?:已(?:经)?(?:成功|顺利)?|成功|完成|搞定|做好了|写好了|建好了)/
+
+/**
+ * 正文里「写出来了、但没被解析成 tool_calls」的调用块。
+ *
+ * 现场（11-11 19:56 GLM-5.3）：模型把参数写成 XML 属性
+ * `<invoke name="glob" pattern="**／*.xls*" path="…">`，解析器认不出，
+ * 整段 XML 落进 content 透传给客户端 —— 客户端只认结构化 tool_call，
+ * 于是这一轮「什么都没发生」，模型却在界面上像给出了回答。
+ *
+ * 要求标签成对闭合才算，避免把「解释协议」时提到的 `<tool_calls>` 误判。
+ * 围栏代码块里的示例由 stripFences 先剔掉。
+ */
+const LEAKED_CALL =
+  /<(?:tool_calls?|\|CHAT2API\|tool_calls)\b[^>]*>[\s\S]{0,8000}?<\/(?:tool_calls?|\|CHAT2API\|tool_calls)>|<(?:invoke|\|CHAT2API\|invoke)\s+name\s*=\s*"[^"]*"[^>]*?(?:\/>|>[\s\S]{0,8000}?<\/(?:invoke|\|CHAT2API\|invoke)>)/i
+
+function findLeakedToolCall(text: string): string | null {
+  const match = LEAKED_CALL.exec(stripFences(text))
+  return match ? match[0] : null
+}
+
+/** 从泄漏的调用块里捞出工具名与已写出的参数，用于渲染正确格式的示例。 */
+function parseLeakedInvoke(leaked: string): { name: string; args: Record<string, string> } {
+  const args: Record<string, string> = {}
+  const openTag = /<(?:invoke|\|CHAT2API\|invoke)\s+([^>]*)>/i.exec(leaked)?.[1] ?? ''
+  const attrRe = /([A-Za-z_][\w\-:.]*)\s*=\s*"([^"]*)"/g
+  let match: RegExpExecArray | null
+  while ((match = attrRe.exec(openTag)) !== null) {
+    const key = match[1]!
+    // name 是工具名；parameter="x" 是「下一个值属于 x」的混合写法，都不是参数本身
+    if (/^name$/i.test(key) || /^parameter$/i.test(key)) continue
+    args[key] = match[2]!
+  }
+  const paramRe =
+    /<(?:parameter|\|CHAT2API\|parameter)\s+name\s*=\s*"([^"]+)"\s*>([\s\S]*?)<\/(?:parameter|\|CHAT2API\|parameter)>/gi
+  while ((match = paramRe.exec(leaked)) !== null) args[match[1]!] = match[2]!
+  const name = /<(?:invoke|\|CHAT2API\|invoke)\s+name\s*=\s*"([^"]*)"/i.exec(leaked)?.[1] ?? ''
+  return { name, args }
+}
 
 /**
  * 这一轮是否在「报完成」。
@@ -380,6 +422,14 @@ export function detectTurnState(
   }
 
   // ── 未声明 ──────────────────────────────────────────────────────────────
+  // 最先查「调用块泄漏」：正文里躺着完整的 <invoke> 说明模型**确实想调工具**，
+  // 只是格式没被解析。这比任何措辞判据都硬，直接作废重开，让它按规范重发。
+  const leaked = findLeakedToolCall(text)
+  if (leaked) {
+    const retry = isTurnStateEnabled() && !isTurnStateDryRun()
+    return verdict('undeclared', 'leaked_tool_call', { retry, leaked })
+  }
+
   // 只有「确实处在任务中途」才追问，否则会把普通问答也拖进重试：
   //   - 历史里有工具结果（做过事，现在该收尾）
   //   - 正文声称已获取/已完成（在报进展）
@@ -438,6 +488,19 @@ export function turnStateNudge(verdict: TurnStateVerdict, protocol?: ToolProtoco
       '直接接着做，不要再抓一次同样的数据。本轮只输出一个工具调用块，完成剩下那一步；内容多就分批写，先写表头再追加行。',
       '调用格式：',
       renderCallExample('write', { path: '<目标文件的绝对路径>', content: '<内容>' }, protocol),
+    ].join('\n')
+  }
+
+  if (verdict.reason === 'leaked_tool_call') {
+    const parsed = parseLeakedInvoke(verdict.leaked ?? '')
+    const toolName = parsed.name || 'write'
+    const args =
+      Object.keys(parsed.args).length > 0 ? parsed.args : { '<参数名>': '<参数值>' }
+    return [
+      '（系统纠偏，不是用户提问）你上一轮写出了工具调用，但那个块没有被识别成调用，客户端把它当成普通文本显示给了用户，等于这一轮什么都没做。',
+      '原因是写法：参数必须是 <invoke> 里的 <parameter name="参数名">值</parameter> 子元素，不能写成 <invoke name="工具" 参数名="值"> 这样的属性，也不要自闭合。',
+      '这一轮只输出一个调用块，把上一轮的调用按下面的格式重写一遍（工具名和参数照原样）：',
+      renderCallExample(toolName, args, protocol),
     ].join('\n')
   }
 

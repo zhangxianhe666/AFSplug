@@ -282,3 +282,62 @@ test('fake_limit 的纠偏：逐条拆掉虚构理由，并要求不要重抓', 
   assert.match(nudge, /不要再抓一次/)
   assert.match(nudge, /\[function_calls\]\[call:write\]/)
 })
+
+// ── 调用块泄漏（11-11 GLM-5.3 现场）────────────────────────────────────────
+// 模型写出了完整的 <tool_calls>，但解析器认不出属性式参数，整段 XML 落进
+// content。这一轮既不该算完成，也不该被当闲聊放过——直接判违约重开。
+
+const LEAKED_XML =
+  '<tool_calls><invoke name="glob" pattern="**/*.xls*" path="C:/Users/37806/Desktop/文件"></invoke></tool_calls>'
+
+test('正文泄漏的调用块判 leaked_tool_call 并要求重开', () => {
+  const state = detectTurnState(reply(LEAKED_XML), plan, {})
+  assert.equal(state.state, 'undeclared')
+  assert.equal(state.reason, 'leaked_tool_call')
+  assert.equal(state.retry, true)
+  assert.match(state.leaked ?? '', /<invoke name="glob"/)
+})
+
+test('泄漏的调用块即使出现在「纯问答」请求里也不放行', () => {
+  // 「有哪些」不在任务词表里，旧逻辑会判 undeclared_chat 直接收工
+  const state = detectTurnState(reply(LEAKED_XML), plan, {
+    userText: '本工作区内的excel文件有哪些',
+  })
+  assert.equal(state.reason, 'leaked_tool_call')
+  assert.equal(state.retry, true)
+})
+
+test('围栏代码块里的调用示例不算泄漏', () => {
+  const state = detectTurnState(
+    reply('调用格式如下：\n```xml\n<tool_calls><invoke name="glob" pattern="**/*.xlsx"></invoke></tool_calls>\n```'),
+    plan,
+    { userText: '本工作区内的excel文件有哪些' },
+  )
+  assert.notEqual(state.reason, 'leaked_tool_call')
+})
+
+test('真调了工具就不看泄漏分支', () => {
+  const state = detectTurnState(reply('', [{ id: 'call_0', type: 'function' }]), plan, {})
+  assert.equal(state.reason, 'has_tool_calls')
+})
+
+test('leaked_tool_call 的纠偏给出正确 parameter 子元素格式', () => {
+  const nudge = turnStateNudge(
+    {
+      state: 'undeclared',
+      reason: 'leaked_tool_call',
+      payload: '',
+      present: [],
+      missing: [],
+      unverifiable: [],
+      fake: [],
+      leaked: LEAKED_XML,
+      retry: true,
+    },
+    'managed_xml',
+  )
+  assert.match(nudge, /没有被识别成调用/)
+  assert.match(nudge, /<parameter name="pattern">/)
+  assert.ok(!/<invoke name="glob" pattern=/.test(nudge))
+  assert.match(nudge, /<parameter name="path">/)
+})

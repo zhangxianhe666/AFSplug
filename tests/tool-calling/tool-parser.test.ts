@@ -551,3 +551,77 @@ test('windows failure result is decorated with the failure banner', () => {
   assert.match(result, /\[TOOL_ERROR\]/)
   assert.match(result, /\[TOOL_ERROR\][\s\S]*not recognized as an internal or external command/)
 })
+
+// ── 属性式 invoke ───────────────────────────────────────────────────────────
+// 输入全部取 11-11 19:5x 现场 GLM-5.3 的逐字输出：模型把参数写成 XML 属性，
+// 严格 pattern 于是一块都认不出，parsed=0，整段 XML 当正文透传给 DSH。
+
+const globTools = [
+  {
+    name: 'glob',
+    description: 'Find files whose paths match a glob pattern.',
+    parameters: {
+      type: 'object',
+      properties: { pattern: { type: 'string' }, path: { type: 'string' } },
+      required: ['pattern'],
+    },
+    source: 'openai' as const,
+  },
+]
+
+test('managed xml recovers attribute-style invoke (live GLM output)', () => {
+  const result = managedXmlProtocol.parse(
+    '<tool_calls><invoke name="glob" pattern="**/*.xls*" path="C:\\Users\\37806\\Desktop\\文件"></invoke></tool_calls>',
+    { tools: globTools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 1)
+  assert.equal(result.toolCalls[0].function.name, 'glob')
+  const args = JSON.parse(result.toolCalls[0].function.arguments)
+  assert.equal(args.pattern, '**/*.xls*')
+  assert.equal(args.path, 'C:\\Users\\37806\\Desktop\\文件')
+  assert.equal(result.content, '')
+})
+
+test('managed xml recovers self-closing attribute invoke', () => {
+  const result = managedXmlProtocol.parse(
+    '<tool_calls><invoke name="glob" pattern="**/*.xlsx" /></tool_calls>',
+    { tools: globTools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 1)
+  assert.equal(JSON.parse(result.toolCalls[0].function.arguments).pattern, '**/*.xlsx')
+})
+
+test('managed xml recovers mixed parameter attribute (live GLM output)', () => {
+  const result = managedXmlProtocol.parse(
+    '<tool_calls><invoke name="glob" parameter="pattern">**/*.xls*</parameter><parameter name="path">C:\\Users\\37806\\Desktop\\文件</parameter></invoke></tool_calls>',
+    { tools: globTools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 1)
+  const args = JSON.parse(result.toolCalls[0].function.arguments)
+  assert.equal(args.pattern, '**/*.xls*')
+  assert.equal(args.path, 'C:\\Users\\37806\\Desktop\\文件')
+})
+
+test('attribute invoke keeps surrounding prose in content', () => {
+  const result = managedXmlProtocol.parse(
+    "I'll look for spreadsheet files in the workspace.\n\n<tool_calls><invoke name=\"glob\" pattern=\"**/*.xlsx\"></invoke></tool_calls>",
+    { tools: globTools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 1)
+  assert.match(result.content, /look for spreadsheet files/)
+  assert.ok(!result.content.includes('<invoke'))
+})
+
+test('attribute value containing > is not cut at the tag boundary', () => {
+  const result = managedXmlProtocol.parse(
+    '<tool_calls><invoke name="glob" pattern="**/*.xlsx" path="C:\\a > b"></invoke></tool_calls>',
+    { tools: globTools, protocol: 'managed_xml' },
+  )
+
+  assert.equal(result.toolCalls.length, 1)
+  assert.equal(JSON.parse(result.toolCalls[0].function.arguments).path, 'C:\\a > b')
+})

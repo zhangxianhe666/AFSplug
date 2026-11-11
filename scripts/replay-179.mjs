@@ -23,16 +23,17 @@ writeFileSync(realFile, 'stub')
 const ghostFile = path.join(ws, 'BU.xlsx')
 
 const TASK = 'NBA今日战况，将内容写入本工作区内新建一个名为BU的excel表'
+const LIST_TASK = '本工作区内的excel文件有哪些'
 
 function reply(content) {
   return { choices: [{ message: { role: 'assistant', content } }] }
 }
 
 /** 与 forwarder 的分支顺序一致：grounding → turnState → ledger → 放行。 */
-function decide(result, messages) {
+function decide(result, messages, userText = TASK) {
   const grounding = detectFalseFileClaim(result, { messages })
-  const turnState = detectTurnState(result, plan, { messages, userText: TASK })
-  const ledger = detectUnbackedProgress(result, plan, { messages, userText: TASK })
+  const turnState = detectTurnState(result, plan, { messages, userText })
+  const ledger = detectUnbackedProgress(result, plan, { messages, userText })
   const doneConfirmed = turnState.reason === 'done_verified'
 
   if (grounding.retry) return { branch: 'grounding', reason: grounding.reason, retry: true }
@@ -87,18 +88,32 @@ const cases = [
     text: '已成功创建 NBA.xlsx，包含今日全部赛果。',
     messages: [{ role: 'user', content: TASK }],
   },
+  {
+    name: 'I 11-11 现场：属性式调用块没被解析，整段当正文',
+    text: '<tool_calls><invoke name="glob" pattern="**/*.xls*" path="C:/Users/37806/Desktop/文件"></invoke></tool_calls>',
+    messages: [{ role: 'user', content: LIST_TASK }],
+    userText: LIST_TASK,
+  },
+  {
+    name: 'J 同一问题的正常回答（不应重开）',
+    text: '当前工作区内共有 8 个 Excel 文件：学生信息表.xlsx、NBA.xlsx、888.xlsx 等。',
+    messages: [{ role: 'user', content: LIST_TASK }],
+    userText: LIST_TASK,
+  },
 ]
 
 let bad = 0
 for (const item of cases) {
   const result = reply(item.text)
-  const out = decide(result, item.messages)
+  const out = decide(result, item.messages, item.userText)
   const cleaned = stripTurnMarker(item.text).replace(/\n+/g, ' / ').slice(0, 46)
   const flag = out.retry ? 'REOPEN' : 'pass  '
   console.log(`${flag} | ${out.branch.padEnd(10)} | ${String(out.reason).padEnd(18)} | ${item.name}`)
   console.log(`       └ 正文：${cleaned}…`)
   if (item.name.startsWith('E') && out.retry) bad += 1
   if (item.name.startsWith('G') && out.retry) bad += 1
+  if (item.name.startsWith('J') && out.retry) bad += 1
+  if (item.name.startsWith('I') && !out.retry) bad += 1
 }
 
-console.log(`\n误伤检查：${bad === 0 ? '通过（E/G 未被重开）' : `失败 ${bad} 例`}`)
+console.log(`\n误伤检查：${bad === 0 ? '通过（E/G/J 未被重开，I 已重开）' : `失败 ${bad} 例`}`)

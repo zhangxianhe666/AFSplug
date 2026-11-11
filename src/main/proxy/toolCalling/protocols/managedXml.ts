@@ -224,6 +224,12 @@ Tool results will be provided back to you as a tool result block.`
         // 的 parameter，尽力恢复工具调用，避免整段 XML 作为普通文本泄漏给客户端。
         tryExtractPartialToolCalls(parseable, allowedNames, rawMatches, invalidToolNames, toolCalls, schemaMap)
 
+        // 属性式 invoke：GLM 高频写法（`<invoke name="glob" pattern="…">`）。放在
+        // schema 驱动恢复之前——它按标签本身定位工具名，比按参数名猜工具更准。
+        if (toolCalls.length === 0) {
+          tryExtractAttributeInvokes(parseable, allowedNames, invalidToolNames, rawMatches, toolCalls)
+        }
+
         // 仍然失败时再按 schema 做一轮宽容恢复：模型有时把参数名/工具名直接当标签
         // （<queries>、<web_search>），上面两条路径都认不出。
         const recoveredSpans: string[] = []
@@ -374,6 +380,134 @@ function parseBlocks(content: string, options: ParseBlockOptions): void {
         buildToolCall(`call_${options.toolCalls.length}`, options.toolCalls.length, name, JSON.stringify(args), invokeMatch[0]),
       )
     }
+  }
+}
+
+/**
+ * 从 `<invoke` 之后找到真正的标签结束 `>`。
+ *
+ * 不能用 `[^>]*?` 直接扫：属性值里合法地可能带 `>`（比如 PowerShell 重定向
+ * `command="… > out.txt"`），那样会把开标签截断在引号中间。
+ */
+function scanTagEnd(content: string, from: number): number {
+  let quote: string | null = null
+  for (let i = from; i < content.length; i += 1) {
+    const ch = content[i]
+    if (quote) {
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === '>') return i
+  }
+  return -1
+}
+
+/**
+ * 提取「参数写成 XML 属性」的 invoke。
+ *
+ * 现场（11-11 19:56，GLM-5.3，用户报「glm 一个 excel 都答不出来」）：
+ * ```
+ * <tool_calls><invoke name="glob" pattern="**／*.xls*" path="C:\…\文件"></invoke></tool_calls>
+ * ```
+ * 严格 pattern 要求 `name="…"` 后**紧跟** `>`，属性一多整块就被跳过；而两轮兜底
+ * 只认 `<parameter name=…>` 子元素，于是 parsed=0，整段 XML 被当正文透传给客户端。
+ * 模型其实把工具名、参数全写对了，只是序列化方式不同。
+ *
+ * 这里按开标签属性恢复，兼容三种写法：
+ *   1. 全属性：`<invoke name="glob" pattern="**／*.xls*">`
+ *   2. 自闭合：`<invoke name="glob" pattern="**／*.xlsx" />`
+ *   3. 混合：`<invoke name="glob" parameter="pattern">值</parameter><parameter name="path">…</parameter></invoke>`
+ *
+ * 只在严格解析与前两轮兜底全落空后调用，且工具名必须在 allowedNames 内，
+ * 因此不会把正文里「提到」的标签误判成调用。
+ */
+function tryExtractAttributeInvokes(
+  content: string,
+  allowedNames: Set<string>,
+  invalidToolNames: string[],
+  rawMatches: string[],
+  toolCalls: ReturnType<typeof buildToolCall>[],
+): void {
+  const lower = content.toLowerCase()
+  const openRe = /<(\|chat2api\|)?invoke\b/gi
+  let match: RegExpExecArray | null
+
+  while ((match = openRe.exec(content)) !== null) {
+    const prefix = match[1] ?? ''
+    const tagStart = match.index
+    const tagEnd = scanTagEnd(content, openRe.lastIndex)
+    if (tagEnd === -1) break
+
+    const openTag = content.slice(tagStart, tagEnd + 1)
+    const attrs = content.slice(match.index + match[0].length, tagEnd)
+    const selfClosing = /\/\s*$/.test(attrs)
+
+    const nameMatch = /(?:^|\s)name\s*=\s*"([^"]*)"/i.exec(attrs)
+    if (!nameMatch) continue
+    const rawName = nameMatch[1].trim()
+    const name = resolveToolName(rawName, allowedNames) ?? rawName
+    if (!allowedNames.has(name)) {
+      if (!invalidToolNames.includes(rawName)) invalidToolNames.push(rawName)
+      continue
+    }
+    if (name !== rawName) {
+      console.log(`[managedXml] 属性式调用工具名模糊纠正: '${rawName}' → '${name}'`)
+    }
+
+    const bodyStart = tagEnd + 1
+    const closeTag = `</${prefix}invoke>`.toLowerCase()
+    const closeIdx = selfClosing ? -1 : lower.indexOf(closeTag, bodyStart)
+    const body = selfClosing ? '' : content.slice(bodyStart, closeIdx === -1 ? content.length : closeIdx)
+    const spanEnd = selfClosing
+      ? bodyStart
+      : closeIdx === -1
+        ? content.length
+        : closeIdx + closeTag.length
+
+    const args: Record<string, unknown> = {}
+    const attrRe = /([A-Za-z_][\w\-:.]*)\s*=\s*"([^"]*)"/g
+    let attr: RegExpExecArray | null
+    let mixedKey: string | null = null
+    while ((attr = attrRe.exec(attrs)) !== null) {
+      const key = attr[1]!
+      const value = attr[2]!
+      if (/^name$/i.test(key)) continue
+      // `parameter="pattern"` 是混合式：属性只给了参数名，值在 invoke 体开头
+      if (/^parameter$/i.test(key)) {
+        mixedKey = value.trim()
+        continue
+      }
+      if (!(key in args)) args[key] = parseJsonValue(value)
+    }
+
+    if (mixedKey && !(mixedKey in args)) {
+      const inline = /^\s*([\s\S]*?)<\/parameter>/i.exec(body)
+      if (inline) args[mixedKey] = parseJsonValue(inline[1] ?? '')
+    }
+
+    const paramRe = /<parameter\s+name\s*=\s*"([^"]+)"\s*>([\s\S]*?)<\/parameter>/gi
+    let param: RegExpExecArray | null
+    while ((param = paramRe.exec(body)) !== null) {
+      // 子元素写法比属性更规范，同名时以它为准
+      args[param[1]!.trim()] = parseJsonValue(param[2]!)
+    }
+
+    // 一个参数都没写出来 → 这不是调用，只是正文里提到了标签（「请参考
+    // <invoke name="x"> 的格式说明」）。严格路径能处理无参工具，这里不兜。
+    if (Object.keys(args).length === 0) continue
+
+    console.log(
+      `[managedXml] 属性式调用已恢复: ${name} 参数键=${Object.keys(args).join(',') || '无'}`,
+    )
+    toolCalls.push(
+      buildToolCall(`call_${toolCalls.length}`, toolCalls.length, name, JSON.stringify(args), openTag),
+    )
+    rawMatches.push(content.slice(tagStart, spanEnd))
+    openRe.lastIndex = spanEnd
   }
 }
 
