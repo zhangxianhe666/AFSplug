@@ -14,6 +14,11 @@ jobs:
       actions: write
 
     strategy:
+      # 五个平台共用同一个 tag，必须串行：electron-builder 发布前会先按 tag 查
+      # release，并发时几个 job 同时查空、各建一个 draft，最终产生重复 Release
+      # 且各自只带一半资产（v1.8.0 现场：两个 draft 各 13 个资产，缺另一半）。
+      fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - os: macos-latest
