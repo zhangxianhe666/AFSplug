@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.7.3-blue?style=flat-square&logo=github" alt="Release">
+  <img src="https://img.shields.io/badge/Release-v1.8.0-blue?style=flat-square&logo=github" alt="Release">
   <img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square" alt="License">
   <br>
   <a href="https://www.electronjs.org/"><img src="https://img.shields.io/badge/Electron-33+-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron"></a>
@@ -36,7 +36,21 @@
 - **多语言**：英文 / 简体中文
 - **现代化 UI**：暗色/亮色主题
 
-## 🆕 本分支新增（v1.7.3）
+## 🆕 本分支新增（v1.8.0）
+
+v1.7.3 ~ v1.7.10 全部围绕一件事：让模型「到底干完没有」变成可校验的状态，而不是从措辞里猜。
+
+- **回合三态协议**：每轮必须显式收尾——有工具调用（ACTING）、`[done] files="C:\abs\out.xlsx"`（DONE）、`[blocked] 理由`（BLOCKED）。三者都没有就是 UNDECLARED，**按定义**这一轮没结束。`[done]` 声明的产物会逐个查磁盘，父目录在而文件不在就判违约重开；`[blocked]` 的理由要过「虚构限制」检查。前七个版本靠词表猜完成/放弃/撒谎，措辞无穷而词表有限，这条路走到头了；现在改由协议规定、由代码解析
+- **属性式 invoke 解析**：GLM 常把参数写成 XML 属性（`<invoke name="glob" pattern="**/*.xls*" path="C:\…">`），旧正则要求 `name="…"` 后紧跟 `>`，整块被跳过、XML 落进正文透传给客户端。现在全属性、自闭合、属性+子元素混合三种写法都认，开标签用引号感知扫描，属性值里的 `>` 不会截断；一个参数都没写出来的纯提及仍不恢复，避免误判
+- **调用块泄漏判违约**：正文里出现成对闭合的 `<tool_calls>` / `<invoke>` 直接作废重开，不再看任务词表。「某某文件有哪些」这类查询原先会落到 `undeclared_chat` 被当闲聊放过——最硬的信号反而最没用
+- **动作对账**：正文声称「已获取 / 已拿到」而历史里没有成功的工具调用结果时重开；账本里有成功记录就直接放行，不看措辞。同时补上 `fake_limit` 判据——「轮数已达上限」「沙盒读不了主机文件」本机均不成立，逐条拆掉
+- **落盘核验**：说「已创建 xxx.xlsx」但磁盘上找不到就判违约；文件真在则幂等放行，不重复干活
+- **工具结果预算**：单条 6000 字符（头 55% + 尾 45%）、总量 18000 字符按由近到远分配；超出部分的**完整原文落盘**到 `%TEMP%/afs-tool-results/`，提示语改为「可以照常使用」——原先写「内容不完整」会被模型复述成放弃理由
+- **沙箱幻觉拔根**：工具 schema 里的 `sandbox_permissions`（`workspace-write` / `danger-full-access`）是「沙盒无法读主机文件」这类幻觉的真实来源，渲染工具清单时直接剥离；协议里的机器提示改为按 `process.platform` 生成，Windows 分支明写 `pwsh`
+- **纠偏示例按协议渲染**：新增 `renderCallExample`，`managed_xml` 与 `managed_bracket` 各出各的格式。此前对 XML 客户端发 `<tool_call>{…}</tool_call>`，模型照抄后同样解析不了
+- **可复现的验证**：310 个用例中 50+ 个的输入取自真实会话逐字原文；`scripts/replay-179.mjs` 按 forwarder 的真实分支顺序回放现场案例，用来发现「单测全绿但现场仍漏」的判据缺口
+
+## v1.7.3
 
 - **沙箱幻觉兜底**：GLM / Kimi 网页版在服务端各挂了一个原生工具（GLM 的 `open_url` 与代码解释器、Kimi 的智能体沙箱）。当它切到沙箱执行时，会把沙箱目录当成用户机器报出来——GLM 报 `/mnt/data`、Kimi 报 `/mnt/agents`，整轮 `parsed=0`。现在命中沙箱痕迹就整轮作废重开（1/8 的失败率压到 1/64 量级）
 - **「没开联网」话术兜底**：Kimi 网页版自带系统提示会教它「网络搜索功能已被禁用，请点击联网按钮」——哪怕 30 个工具都注入了，它也会把问题推回给用户。这类话术（含「需要您提供具体 URL」「我无法主动搜索」等变体）现在按语义正则识别，重开时明确告诉它「本会话没有联网开关，`web_fetch` 就是联网能力」，并给出可直接抓的网址配方（天气走 `https://wttr.in/<地名>?format=3`），实测 12/12 拉回工具调用
@@ -119,8 +133,8 @@ npm run build:all    # 全平台
 打 `v*` 标签触发 GitHub Actions 五平台并行构建：
 
 ```bash
-git tag v1.7.3
-git push origin v1.7.3
+git tag v1.8.0
+git push origin v1.8.0
 ```
 
 > 注意：electron-builder 默认创建 Draft Release，发布后需手动执行
